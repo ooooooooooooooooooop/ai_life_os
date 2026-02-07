@@ -1,0 +1,19 @@
+# Model Configuration Template for AI Life OS
+# =================================================
+# Copy this file to 'local_model.yaml' and fill in your keys.
+# 'local_model.yaml' is ignored by git to protect your privacy.
+
+# Option 1: Ollama (Local - Recommended for Privacy)
+# --------------------------------------------------
+provider: ollama
+base_url: "http://localhost:11434"
+model_name: "mistral:latest"
+temperature: 0.7
+max_tokens: 2000
+
+# Option 2: OpenAI / Compatible API
+# --------------------------------------------------
+# provider: openai
+# base_url: "https://api.openai.com/v1"
+# model_name: "gpt-4o"
+# api_key: "sk-your-key-here"

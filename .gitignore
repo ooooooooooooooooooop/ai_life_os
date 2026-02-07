@@ -1,0 +1,43 @@
+# System
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv/
+venv/
+ENV/
+
+# Configuration (Privacy)
+config/*.local.yaml
+config/local_*.yaml
+config/model.yaml
+config/runtime.yaml
+
+# Data & Logs (含快照与备份，避免提交用户数据)
+data/*.json
+data/*.jsonl
+data/*.bak
+data/snapshots/
+logs/*.log
+*.log
+
+# Frontend build / deps
+node_modules/
+dist/
+.vite/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Project Management & Plans (Excluded; repo = runnable code + docs only)
+.taskflow/
+archive/
+superpowers/
+tests/
+test_*.py
+plan.md
+todo.md
+

@@ -1,0 +1,42 @@
+# Phase Rules Configuration
+# 控制不同能量阶段下的任务过滤策略
+# 支持运行时热加载
+
+version: 1
+hot_reload: true  # 启用运行时热加载（每 2 秒检查文件变更）
+
+phases:
+  deep_work:
+    description: "深度专注期 - 仅允许 L2 任务和维护任务"
+    allow:
+      - flourishing_session
+      - maintenance
+    block:
+      - substrate_task
+    exceptions:
+      # 紧急情况下，即使被 block 也允许通过
+      emergency_keywords:
+        - "服务器宕机"
+        - "紧急"
+        - "CRITICAL"
+        - "EMERGENCY"
+
+  logistics:
+    description: "事务处理期 - 允许全部任务，优先 L1"
+    allow: all
+    priority_boost:
+      - substrate_task  # L1 优先排序
+
+  activation:
+    description: "唤醒期 - 仅允许维护任务"
+    allow:
+      - maintenance
+    block: all_except_allowed
+
+  leisure:
+    description: "休息期 - 允许全部任务"
+    allow: all
+
+  connection:
+    description: "社交期 - 允许全部任务"
+    allow: all

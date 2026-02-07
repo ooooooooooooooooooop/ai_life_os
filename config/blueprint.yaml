@@ -1,0 +1,41 @@
+# 目标评分与多元化 - 可调说明
+# - principles.*.weight: 调整各维度权重可改变 Blueprint 评分与排序
+# - threshold: 低于此分数的目标将被过滤
+# - 目标多元化（Career/Health/Joy 等）由 core/goal_generator 生成 prompt 与 config/prompts/inference/goal_system.md、goal_user.md 控制，可根据反馈修改类别或文案
+#
+# Guardian 干预权限（复盘/建议展示）：
+# - intervention_level: OBSERVE_ONLY（只记录不展示）| SOFT（展示建议，默认）| ASK（展示并需用户确认）
+# - 本版不实现 IMMEDIATE（强制），留待 Safe Mode 之后
+intervention_level: SOFT
+
+principles:
+  - name: "life_value"
+    weight: 0.35
+    description: "该目标是否产生长期价值？包括：技能习得、健康改善、精力恢复、人际关系加深。避免纯粹的消耗。"
+    evaluation: "llm"
+    
+  - name: "growth_potential"
+    weight: 0.25
+    description: "该目标是否拓展了用户的边界？包括：职业能力、认知视野、新体验、创造力。"
+    evaluation: "llm"
+    
+  - name: "feasibility"
+    weight: 0.2
+    description: "目标是否不仅可达成，而且在这个阶段是'顺势而为'的？不要好高骛远。"
+    evaluation: "llm"
+    
+  - name: "joy_factor"
+    weight: 0.2
+    description: "该目标是否让用户感到兴奋、有趣或内心充盈？拒绝苦行僧式的枯燥任务。"
+    evaluation: "llm"
+
+threshold: 0.6  # 总分低于 0.6 的目标将被过滤
+
+hard_rules:
+  - name: "time_budget"
+    description: "目标预估投入时间不能超过用户每日可用时间的 1.5 倍（给点余量）"
+    check: "goal_hours <= daily_hours * 1.5"
+    
+  - name: "no_conflict"
+    description: "不应与现有活跃目标存在明显冲突（如时间冲突或方向排斥）"
+    check: "not conflict"
