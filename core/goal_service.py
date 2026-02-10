@@ -116,7 +116,11 @@ class GoalService:
             data.setdefault("target_level", "")
         return data
 
-    def node_to_legacy_goal(self, node: ObjectiveNode, extras: Optional[Dict[str, Any]] = None) -> LegacyGoal:
+    def node_to_legacy_goal(
+        self,
+        node: ObjectiveNode,
+        extras: Optional[Dict[str, Any]] = None,
+    ) -> LegacyGoal:
         extras = extras or {}
         status_value = self.legacy_status_from_state(node.state)
         try:
@@ -141,7 +145,12 @@ class GoalService:
     # ---------------------------------------------------------------------
     # Event helpers
     # ---------------------------------------------------------------------
-    def _emit_canonical_event(self, event_type: str, node: ObjectiveNode, payload: Optional[Dict[str, Any]] = None) -> None:
+    def _emit_canonical_event(
+        self,
+        event_type: str,
+        node: ObjectiveNode,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
         append_event(
             {
                 "type": event_type,
@@ -163,7 +172,11 @@ class GoalService:
             raise ValueError("Goal not found")
         return node
 
-    def list_nodes(self, state: Optional[str] = None, layer: Optional[str] = None) -> List[ObjectiveNode]:
+    def list_nodes(
+        self,
+        state: Optional[str] = None,
+        layer: Optional[str] = None,
+    ) -> List[ObjectiveNode]:
         nodes = self.registry.visions + self.registry.objectives + self.registry.goals
         if state:
             nodes = [n for n in nodes if n.state.value == state]
@@ -199,7 +212,12 @@ class GoalService:
     # ---------------------------------------------------------------------
     # Command operations
     # ---------------------------------------------------------------------
-    def create_vision(self, title: str, description: str = "", source: str = "user_input") -> ObjectiveNode:
+    def create_vision(
+        self,
+        title: str,
+        description: str = "",
+        source: str = "user_input",
+    ) -> ObjectiveNode:
         node = ObjectiveNode(
             id=self._new_id("vision"),
             title=title,
@@ -245,7 +263,9 @@ class GoalService:
 
         node.title = goal_data.get("title", node.title)
         node.description = goal_data.get("description", node.description)
-        node.layer = self.layer_from_horizon(goal_data.get("horizon", self.horizon_from_layer(node.layer)))
+        node.layer = self.layer_from_horizon(
+            goal_data.get("horizon", self.horizon_from_layer(node.layer))
+        )
         node.state = GoalState.ACTIVE
         node.source = self.source_from_string(goal_data.get("source", node.source.value))
         node.parent_id = goal_data.get("parent_id", node.parent_id)
@@ -319,7 +339,12 @@ class GoalService:
         )
         return node
 
-    def apply_action(self, goal_id: str, action: str, reason: Optional[str] = None) -> ObjectiveNode:
+    def apply_action(
+        self,
+        goal_id: str,
+        action: str,
+        reason: Optional[str] = None,
+    ) -> ObjectiveNode:
         node = self.require_node(goal_id)
         normalized = action.strip().lower()
 

@@ -67,9 +67,15 @@ def confirm_goal(req: ConfirmRequest):
 def list_goals():
     service = get_goal_service()
     all_nodes = service.list_nodes()
-    active = [service.node_to_dict(n, include_legacy=True) for n in all_nodes if n.state.value == "active"]
+    active = [
+        service.node_to_dict(n, include_legacy=True)
+        for n in all_nodes
+        if n.state.value == "active"
+    ]
     completed = [
-        service.node_to_dict(n, include_legacy=True) for n in all_nodes if n.state.value == "completed"
+        service.node_to_dict(n, include_legacy=True)
+        for n in all_nodes
+        if n.state.value == "completed"
     ]
     return {"active": active, "completed": completed}
 
@@ -109,7 +115,11 @@ def decompose_goal(goal_id: str, req: Optional[DecomposeRequest] = None):
 
     try:
         if req is None or (not req.selected_option and not req.custom_input):
-            return service.get_decomposition_options(goal_id, context=req.context if req else None, n=3)
+            return service.get_decomposition_options(
+                goal_id,
+                context=req.context if req else None,
+                n=3,
+            )
 
         child, tasks_created, existed = service.create_decomposed_child(
             goal_id=goal_id,

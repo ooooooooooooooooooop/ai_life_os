@@ -2,7 +2,7 @@ import asyncio
 import json
 from dataclasses import asdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -66,7 +66,8 @@ def _has_review_due_this_week() -> bool:
                 event = json.loads(line)
                 if event.get("type") != "review_due":
                     continue
-                date_raw = event.get("date") or (event.get("timestamp", "")[:10] if event.get("timestamp") else "")
+                timestamp = event.get("timestamp") or ""
+                date_raw = event.get("date") or timestamp[:10]
                 if not date_raw:
                     continue
                 event_date = datetime.strptime(date_raw[:10], "%Y-%m-%d").date()
@@ -95,7 +96,10 @@ async def get_state():
         active_tasks = [
             asdict(t)
             for t in tasks
-            if str(getattr(getattr(t, "status", None), "value", getattr(t, "status", ""))) == "pending"
+            if str(
+                getattr(getattr(t, "status", None), "value", getattr(t, "status", ""))
+            )
+            == "pending"
         ]
 
     return {
@@ -127,14 +131,22 @@ async def get_retrospective(days: int = 7):
 @router.get("/visions")
 async def list_visions():
     service = get_goal_service()
-    return {"visions": [service.node_to_dict(v, include_legacy=True) for v in service.list_visions()]}
+    return {
+        "visions": [
+            service.node_to_dict(v, include_legacy=True) for v in service.list_visions()
+        ]
+    }
 
 
 @router.put("/visions/{vision_id}")
 async def update_vision(vision_id: str, request: VisionUpdateRequest):
     service = get_goal_service()
     try:
-        vision = service.update_vision(vision_id, title=request.title, description=request.description)
+        vision = service.update_vision(
+            vision_id,
+            title=request.title,
+            description=request.description,
+        )
     except ValueError as exc:
         message = str(exc).lower()
         if "not found" in message:
@@ -171,7 +183,11 @@ async def submit_feedback(goal_id: str, request: FeedbackRequest):
     result = classify_feedback(request.message)
     service = get_goal_service()
     try:
-        goal = service.apply_feedback(goal_id, result.intent.value, extracted_reason=result.extracted_reason)
+        goal = service.apply_feedback(
+            goal_id,
+            result.intent.value,
+            extracted_reason=result.extracted_reason,
+        )
     except ValueError:
         raise HTTPException(status_code=404, detail="Goal not found")
 

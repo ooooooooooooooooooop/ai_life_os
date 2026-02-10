@@ -16,10 +16,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.event_sourcing import rebuild_state
-from core.goal_service import GoalService
-from core.objective_engine.models import GoalLayer, GoalSource, GoalState, ObjectiveNode
-from core.objective_engine.registry import GoalRegistry, REGISTRY_PATH
+from core.event_sourcing import rebuild_state  # noqa: E402
+from core.goal_service import GoalService  # noqa: E402
+from core.objective_engine.models import GoalLayer, GoalSource, GoalState, ObjectiveNode  # noqa: E402
+from core.objective_engine.registry import GoalRegistry, REGISTRY_PATH  # noqa: E402
 
 
 def _to_layer(horizon: Optional[str]) -> GoalLayer:
