@@ -1,9 +1,9 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 import json
 
 from core.llm_adapter import get_llm
-from core.strategic_engine.bhb_parser import parse_bhb, BHBConfig
+from core.strategic_engine.bhb_parser import parse_bhb
 from core.strategic_engine.info_sensing import search_market_trends
 from core.utils import load_prompt, parse_llm_json
 
@@ -28,18 +28,18 @@ def infer_vision(
 ) -> Optional[InferredVision]:
     """
     Vision 推断主函数。
-    
+
     推断逻辑:
     1. 收集用户状态 (identity, skills, constraints)
     2. 解析 BHB 获取哲学方向
     3. [可选] 调用搜索获取市场信息
     4. 调用 LLM 综合推断 Vision
-    
+
     Args:
         state: 当前系统状态
         enable_search: 是否启用搜索 (False 用于测试或离线模式)
         search_limit: 搜索查询次数上限
-    
+
     Returns:
         InferredVision 或 None (如果推断失败)
     """
@@ -47,10 +47,10 @@ def infer_vision(
     identity = state.get("identity", {})
     skills = state.get("capability", {}).get("skills", [])
     constraints = state.get("constraints", {})
-    
+
     # 2. 解析 BHB
     bhb_config = parse_bhb()
-    
+
     # 3. 搜索市场信息 (如果启用)
     search_results = []
     if enable_search and skills:
@@ -61,14 +61,14 @@ def infer_vision(
             location=identity.get("city", "China"),
             limit=search_limit
         )
-    
+
     # 4. 构建 Prompt
     llm = get_llm("strategic_brain")
     system_prompt = load_prompt("vision_synthesis")
-    
+
     if not system_prompt:
         system_prompt = _default_vision_prompt()
-    
+
     context = {
         "identity": identity,
         "skills": skills,
@@ -78,7 +78,7 @@ def infer_vision(
         "bhb_metrics": [m.description for m in bhb_config.life_metrics],
         "market_insights": search_results
     }
-    
+
     prompt = f"""请基于以下信息，推断一个高价值的人生愿景 (Vision)。
 
 用户信息:
@@ -108,7 +108,7 @@ def infer_vision(
   "bhb_alignment": "与 BHB 的对齐说明"
 }}
 ```"""
-    
+
     # 5. 调用 LLM
     try:
         response = llm.generate(
@@ -117,7 +117,7 @@ def infer_vision(
             temperature=0.7,
             max_tokens=1500
         )
-        
+
         if response.success and response.content:
             result = parse_llm_json(response.content)
             if result:
@@ -137,7 +137,7 @@ def infer_vision(
                 )
     except Exception as e:
         print(f"[VisionInference] Failed: {e}")
-    
+
     return None
 
 

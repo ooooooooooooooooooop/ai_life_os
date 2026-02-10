@@ -49,7 +49,7 @@ def load_system_config() -> Dict[str, Any]:
 def get_pause_mode() -> str:
     """
     Get current system pause mode.
-    
+
     Returns:
         One of: 'normal', 'soft_pause', 'hard_pause', 'maintenance'
     """
@@ -60,12 +60,12 @@ def get_pause_mode() -> str:
 def can_proceed() -> Tuple[bool, str]:
     """
     Check if system can proceed with normal operations.
-    
+
     Returns:
         Tuple of (can_proceed: bool, reason: str)
     """
     mode = get_pause_mode()
-    
+
     if mode == "normal":
         return True, "System running normally"
     elif mode == "soft_pause":
@@ -81,15 +81,15 @@ def can_proceed() -> Tuple[bool, str]:
 def daily_tick(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     执行每日时间推进并生成相关事件。
-    
+
     Args:
         state: 当前状态字典。
-    
+
     Returns:
         事件列表（可能包含多个事件）。
         - TimeTick: 日期变更时生成
         - ReviewDue: 到达周报日时生成
-    
+
     因果链说明 (RIPER Rule 3):
         触发条件: 日期变更
         成立条件: current_date != today
@@ -98,14 +98,14 @@ def daily_tick(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     events = []
     today = datetime.now().strftime("%Y-%m-%d")
     now = datetime.now()
-    
+
     # Check if already ticked today
     current_date = state.get("time_state", {}).get("current_date", "")
-    
+
     if current_date == today:
         # Already ticked today, no new events
         return events
-    
+
     # Event 1: TimeTick - 日期变更
     events.append({
         "type": EventType.TIME_TICK.value,
@@ -113,7 +113,7 @@ def daily_tick(state: Dict[str, Any]) -> List[Dict[str, Any]]:
         "previous_date": current_date,
         "timestamp": now.isoformat()
     })
-    
+
     # Event 2: ReviewDue - 周报触发
     # 因果链: weekday == WEEKLY_REVIEW_DAY -> 触发周报
     if now.weekday() == config.WEEKLY_REVIEW_DAY:
@@ -121,31 +121,34 @@ def daily_tick(state: Dict[str, Any]) -> List[Dict[str, Any]]:
             "type": EventType.REVIEW_DUE.value,
             "review_type": "weekly",
             "date": today,
-            "trigger_reason": f"Today is weekday {config.WEEKLY_REVIEW_DAY} (configured review day)",
+            "trigger_reason": (
+                f"Today is weekday {config.WEEKLY_REVIEW_DAY} "
+                "(configured review day)"
+            ),
             "timestamp": now.isoformat()
         })
-    
+
     return events
 
 
 def check_and_tick(state: Dict[str, Any]) -> Tuple[bool, List[Dict[str, Any]]]:
     """
     检查暂停模式并执行 tick（如果允许）。
-    
+
     Args:
         state: 当前状态字典。
-    
+
     Returns:
         Tuple of (ticked: bool, events: List[dict])
         - ticked: 是否生成了事件
         - events: 事件列表（用于追加到日志）
     """
     can_run, reason = can_proceed()
-    
+
     if not can_run:
         print(f"[Scheduler] {reason}")
         return False, []
-    
+
     events = daily_tick(state)
     return len(events) > 0, events
 
@@ -157,7 +160,7 @@ def ensure_tick_applied() -> Dict[str, Any]:
     """
     from core.snapshot_manager import restore_from_snapshot
     from core.event_sourcing import append_event, rebuild_state
-    
+
     state = restore_from_snapshot()
     ticked, events = check_and_tick(state)
     if events:

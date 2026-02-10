@@ -1,7 +1,5 @@
 import sys
 import os
-import uuid
-from datetime import datetime
 
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
@@ -12,7 +10,7 @@ from core.objective_engine.models import ObjectiveNode, GoalState, GoalLayer, Go
 def seed_demo_data():
     print("正在注入演示数据...")
     registry = GoalRegistry()
-    
+
     # 1. 注入 Vision (愿景)
     vision_id = "vis_demo_001"
     if not any(v.id == vision_id for v in registry.visions):
@@ -26,7 +24,7 @@ def seed_demo_data():
         )
         registry.add_node(vision)
         print(f"✅ 已添加 Vision: {vision.title}")
-    
+
     # 2. 注入 Pending Goal (待确认目标 - 模拟 Steward 推导)
     pending_id = "goal_demo_pending"
     if not any(g.id == pending_id for g in registry.goals + registry.objectives):

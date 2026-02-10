@@ -1,6 +1,5 @@
 import json
-from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from pydantic import BaseModel
 
 from core.llm_adapter import get_llm
@@ -26,9 +25,10 @@ Current Active Goals:
 User Message: "{user_message}"
 
 Determine the user's intent:
-1. UPDATE_IDENTITY: User is providing personal info (name, job, city, habit, etc.). 
+1. UPDATE_IDENTITY: User is providing personal info (name, job, city, habit, etc.).
    - Extract the fields to update in "identity" or "constraints".
-   - valid fields: identity.name, identity.city, identity.occupation, identity.bio, constraints.work_hours, constraints.sleep_hours.
+   - valid fields: identity.name, identity.city, identity.occupation,
+     identity.bio, constraints.work_hours, constraints.sleep_hours.
 2. GOAL_FEEDBACK: User is providing feedback on a SPECIFIC active goal or general progress.
    - If they allow it, infer which goal they mean.
    - extract feedback intent: COMPLETE, SKIP, DEFER, BLOCKED.
@@ -39,7 +39,7 @@ Return JSON format:
     "intent": "UPDATE_IDENTITY" | "GOAL_FEEDBACK" | "CHAT",
     "reply": "Natural language reply to the user (keep it concise, friendly, 'Steward' persona)",
     "updates": {{
-        "identity.city": "New York", 
+        "identity.city": "New York",
         "goal_id_123": "COMPLETE"
     }}
 }}
@@ -54,7 +54,11 @@ class InteractionHandler:
 
     def process(self, message: str) -> InteractionResponse:
         # Prepare context
-        active_goals = [f"[{g.id}] {g.title}" for g in self.registry.goals if g.state == GoalState.ACTIVE]
+        active_goals = [
+            f"[{g.id}] {g.title}"
+            for g in self.registry.goals
+            if g.state == GoalState.ACTIVE
+        ]
         state_summary = json.dumps(self.state.get("identity", {}), ensure_ascii=False)
 
         prompt = PROMPT_TEMPLATE.format(
@@ -64,15 +68,15 @@ class InteractionHandler:
         )
 
         try:
-            print(f"[Interaction] Sending prompt to LLM...")
+            print("[Interaction] Sending prompt to LLM...")
             # Use generate() from LLMAdapter interface
             llm_resp = self.llm.generate(prompt)
             if not llm_resp.success:
                 raise Exception(f"LLM Generation Failed: {llm_resp.error}")
-                
+
             raw_resp = llm_resp.content
             print(f"[Interaction] Raw Resp: {raw_resp}")
-            
+
             # Robust JSON extraction
             import re
             json_match = re.search(r'\{.*\}', raw_resp, re.DOTALL)
@@ -86,19 +90,22 @@ class InteractionHandler:
             except json.JSONDecodeError:
                 # Fallback: try to fix common JSON errors or just fail gracefully
                 print("[Interaction] JSON Decode Error. Fallback to CHAT.")
-                data = {"intent": "CHAT", "reply": raw_resp or "I didn't quite catch that (JSON Error)."}
-            
+                data = {
+                    "intent": "CHAT",
+                    "reply": raw_resp or "I didn't quite catch that (JSON Error).",
+                }
+
             intent = data.get("intent", "CHAT")
             reply = data.get("reply", "System processed your request.")
             updates = data.get("updates", {})
-            
+
             updated_fields = []
 
             # Execute Updates
             if intent == "UPDATE_IDENTITY":
                 self._update_identity(updates)
                 updated_fields = list(updates.keys())
-            
+
             elif intent == "GOAL_FEEDBACK":
                 self._handle_goal_feedback(updates)
                 updated_fields = list(updates.keys())
@@ -118,11 +125,11 @@ class InteractionHandler:
             )
 
     def _update_identity(self, updates: Dict[str, Any]):
-        # This requires State to be mutable and persisted. 
+        # This requires State to be mutable and persisted.
         # For now, we update the dict, calling code must save it.
         identity = self.state.setdefault("identity", {})
         constraints = self.state.setdefault("constraints", {})
-        
+
         for k, v in updates.items():
             if k.startswith("identity."):
                 field = k.split(".")[1]

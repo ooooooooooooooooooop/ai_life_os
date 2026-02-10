@@ -31,7 +31,7 @@ class FailureContext:
     failure_type: FailureType
     reason: str
     original_task: Dict[str, Any]
-    
+
     # 可选：历史失败次数（用于升级策略）
     failure_count: int = 1
 
@@ -40,7 +40,7 @@ class FailureContext:
 class HandlingResult:
     """
     处理结果。
-    
+
     因果链说明:
         action: 采取的动作
         rationale: 为什么采取此动作（因果链）
@@ -55,12 +55,12 @@ class HandlingResult:
 
 class FailureStrategy(ABC):
     """失败处理策略基类。"""
-    
+
     @abstractmethod
     def can_handle(self, context: FailureContext) -> bool:
         """判断此策略是否适用于给定的失败类型。"""
         pass
-    
+
     @abstractmethod
     def handle(self, context: FailureContext) -> HandlingResult:
         """执行处理逻辑。"""
@@ -70,16 +70,16 @@ class FailureStrategy(ABC):
 class UserRejectStrategy(FailureStrategy):
     """
     用户拒绝策略。
-    
+
     因果链:
         触发条件: 用户主动选择"跳过"或"不想做"
         处理逻辑: 降低任务权重，减少未来推荐频率
         失效条件: 如果连续多次拒绝，可能需要移除任务
     """
-    
+
     def can_handle(self, context: FailureContext) -> bool:
         return context.failure_type == FailureType.USER_REJECT
-    
+
     def handle(self, context: FailureContext) -> HandlingResult:
         # 根据拒绝次数调整策略
         if context.failure_count >= 3:
@@ -90,7 +90,7 @@ class UserRejectStrategy(FailureStrategy):
                 confidence=0.9,
                 metadata={"archive_reason": "repeated_rejection"}
             )
-        
+
         return HandlingResult(
             task_id=context.task_id,
             action="reduce_weight",
@@ -102,16 +102,16 @@ class UserRejectStrategy(FailureStrategy):
 class ContextMismatchStrategy(FailureStrategy):
     """
     上下文不匹配策略。
-    
+
     因果链:
         触发条件: 客观条件不满足（如：需要特定设备、地点、天气等）
         处理逻辑: 保留任务权重，记录阻塞原因，寻找替代方案
         失效条件: 如果阻塞条件长期存在，可能需要重新评估任务可行性
     """
-    
+
     def can_handle(self, context: FailureContext) -> bool:
         return context.failure_type == FailureType.CONTEXT_MISMATCH
-    
+
     def handle(self, context: FailureContext) -> HandlingResult:
         return HandlingResult(
             task_id=context.task_id,
@@ -128,16 +128,16 @@ class ContextMismatchStrategy(FailureStrategy):
 class ResourceShortageStrategy(FailureStrategy):
     """
     资源不足策略。
-    
+
     因果链:
         触发条件: 时间或精力不足
         处理逻辑: 重新调度到合适时间
         失效条件: 如果持续没有时间，可能需要调整任务优先级
     """
-    
+
     def can_handle(self, context: FailureContext) -> bool:
         return context.failure_type == FailureType.RESOURCE_SHORTAGE
-    
+
     def handle(self, context: FailureContext) -> HandlingResult:
         return HandlingResult(
             task_id=context.task_id,
@@ -151,22 +151,22 @@ class ResourceShortageStrategy(FailureStrategy):
 class SystemErrorStrategy(FailureStrategy):
     """
     系统错误策略。
-    
+
     因果链:
         触发条件: AI 规划错误或系统异常
         处理逻辑: 移除无效任务，记录日志用于改进
         失效条件: 不适用
     """
-    
+
     def can_handle(self, context: FailureContext) -> bool:
         return context.failure_type == FailureType.SYSTEM_ERROR
-    
+
     def handle(self, context: FailureContext) -> HandlingResult:
         from core.llm_adapter import get_llm
-        
+
         reason = context.reason
         advice = "建议检查日志并修正逻辑"
-        
+
         # 使用 Coding Hands (Claude) 分析系统错误
         try:
             llm = get_llm("coding_hands")
@@ -177,13 +177,13 @@ class SystemErrorStrategy(FailureStrategy):
 原始任务: {str(context.original_task)}
 
 请作为资深工程师分析此错误，并给出具体的修复建议或代码片段。简明扼要。"""
-                
+
                 response = llm.generate(prompt, max_tokens=300)
                 if response.success:
                     advice = response.content.strip()
         except Exception:
             pass
-            
+
         return HandlingResult(
             task_id=context.task_id,
             action="remove_and_log",
@@ -196,12 +196,12 @@ class SystemErrorStrategy(FailureStrategy):
 class FailureHandler:
     """
     失败处理器（策略调度器）。
-    
+
     使用方式:
         handler = FailureHandler()
         result = handler.handle(context)
     """
-    
+
     def __init__(self):
         # 按优先级排序的策略列表
         self._strategies: List[FailureStrategy] = [
@@ -210,21 +210,21 @@ class FailureHandler:
             ContextMismatchStrategy(),
             ResourceShortageStrategy(),
         ]
-    
+
     def handle(self, context: FailureContext) -> HandlingResult:
         """
         根据失败类型选择合适的策略处理。
-        
+
         Args:
             context: 失败上下文
-            
+
         Returns:
             处理结果
         """
         for strategy in self._strategies:
             if strategy.can_handle(context):
                 return strategy.handle(context)
-        
+
         # 兜底：未知类型
         return HandlingResult(
             task_id=context.task_id,
@@ -232,12 +232,12 @@ class FailureHandler:
             rationale=f"未知失败类型: {context.failure_type.value}",
             confidence=0.5
         )
-    
+
     @staticmethod
     def classify_failure(legacy_type: str) -> FailureType:
         """
         将旧版失败类型映射到新的枚举。
-        
+
         用于兼容旧数据。
         """
         mapping = {

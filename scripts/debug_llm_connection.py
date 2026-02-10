@@ -1,5 +1,4 @@
 import sys
-import os
 from pathlib import Path
 
 # Add project root to path
@@ -15,18 +14,18 @@ def test_connection():
         print(f"Model: {adapter.model_name}")
         if hasattr(adapter, 'base_url'):
             print(f"Endpoint: {adapter.base_url}")
-            
+
         response = adapter.generate(
-            prompt="Hello, are you working?", 
+            prompt="Hello, are you working?",
             max_tokens=10
         )
-        
+
         if response.success:
             print("\n[SUCCESS] Connection verified!")
             print(f"Response: {response.content}")
         else:
             print(f"\n[FAILURE] Logic Error: {response.error}")
-            
+
     except Exception as e:
         print(f"\n[CRITICAL FAILURE] Exception: {type(e).__name__}")
         print(str(e))

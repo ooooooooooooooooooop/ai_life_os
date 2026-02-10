@@ -8,7 +8,7 @@ import sys
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.paths import DATA_DIR
+from core.paths import DATA_DIR  # noqa: E402
 
 EVENT_LOG_PATH = DATA_DIR / "event_log.jsonl"
 
@@ -19,7 +19,7 @@ def analyze():
 
     goals = []
     goal_titles = []
-    
+
     with open(EVENT_LOG_PATH, "r", encoding="utf-8") as f:
         for line_num, line in enumerate(f, 1):
             if not line.strip():
@@ -34,14 +34,14 @@ def analyze():
                 print(f"Error parsing line {line_num}: {e}")
 
     print(f"Total goals created: {len(goals)}")
-    
+
     title_counts = Counter(goal_titles)
-    
+
     print("\n--- Top Duplicates ---")
     for title, count in title_counts.most_common(10):
         if count > 1:
             print(f"{count}x: {title}")
-            
+
     print("\n--- 'Option' Goals ---")
     option_goals = [t for t in goal_titles if "选项" in t or "Option" in t]
     option_counts = Counter(option_goals)

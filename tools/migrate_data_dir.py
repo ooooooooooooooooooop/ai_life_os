@@ -5,7 +5,7 @@ import argparse
 import shutil
 from pathlib import Path
 
-from core.paths import DATA_DIR, PROJECT_ROOT
+from core.paths import PROJECT_ROOT
 
 
 def migrate_data(src: Path, dest: Path, overwrite: bool = False) -> None:

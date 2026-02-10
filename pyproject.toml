@@ -8,18 +8,20 @@ authors = [
 requires-python = ">=3.8"
 
 [tool.ruff]
-# Select rules from generic (E, W) and flak8 (F)
-select = ["E", "W", "F"]
-ignore = []
-
-# Exclude varied directories
 exclude = [
     ".venv",
     "__pycache__",
     "config",
+    ".agent",
+    ".taskflow",
 ]
 
 line-length = 100
+
+[tool.ruff.lint]
+# Select rules from generic (E, W) and flake8 (F)
+select = ["E", "W", "F"]
+ignore = []
 
 [tool.isort]
 profile = "black"

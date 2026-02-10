@@ -12,7 +12,6 @@ from enum import Enum
 
 from core.llm_adapter import get_llm
 from core.utils import load_prompt, parse_llm_json
-from core.config_manager import config
 
 
 class GoalType(str, Enum):
@@ -34,7 +33,7 @@ class SubTask:
     type: str = "task" # "task" (L1) or "session" (L2)
     prerequisite: Optional[str] = None
     status: str = "pending"  # pending, in_progress, completed, failed
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -50,11 +49,11 @@ class Goal:
     deadline: Optional[str] = None
     sub_tasks: List[SubTask] = None
     status: str = "active"  # active, completed, abandoned
-    
+
     def __post_init__(self):
         if self.sub_tasks is None:
             self.sub_tasks = []
-            
+
         if isinstance(self.type, str):
             # Compatibility with string inputs
             type_str = self.type.upper()
@@ -64,13 +63,13 @@ class Goal:
                 self.type = GoalType.FLOURISHING
             else:
                 self.type = GoalType.SUBSTRATE
-    
+
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
         result["type"] = self.type.value
         result["sub_tasks"] = [st.to_dict() for st in self.sub_tasks]
         return result
-    
+
     @property
     def progress(self) -> float:
         """Calculate completion progress (0.0 - 1.0)."""
@@ -91,7 +90,7 @@ def decompose_goal_with_llm(
     Use LLM to decompose a goal based on its layer (L1 vs L2).
     """
     llm = get_llm("strategic_brain")
-    
+
     # Select Prompt based on GoalType
     if goal_type == GoalType.SUBSTRATE:
         system_prompt = load_prompt("goal_substrate")
@@ -99,28 +98,28 @@ def decompose_goal_with_llm(
     else:
         system_prompt = load_prompt("goal_flourishing")
         prompt_suffix = "请规划 1-3 个深度体验时段 (Sessions)。"
-    
+
     if not system_prompt:
         # Fallback if prompt file missing
         system_prompt = "You are a task decomposer."
-    
+
     prompt = f"""目标 ({goal_type.value}): {goal_title}
 详细描述: {goal_description}
 """
     if context:
         prompt += f"\n用户背景:\n{json.dumps(context, ensure_ascii=False, indent=2)}\n"
-    
+
     prompt += f"\n{prompt_suffix}"
-    
+
     response = llm.generate(
         prompt=prompt,
         system_prompt=system_prompt,
         temperature=0.3 if goal_type == GoalType.SUBSTRATE else 0.6, # L2 can be more creative
         max_tokens=800
     )
-    
+
     sub_tasks = []
-    
+
     if response.success and response.content:
         try:
             result = parse_llm_json(response.content)
@@ -144,7 +143,7 @@ def decompose_goal_with_llm(
                 estimated_time="30min",
                 difficulty="medium"
             ))
-            
+
     return sub_tasks
 
 
@@ -167,19 +166,19 @@ def create_goal(
         created_at=datetime.now().isoformat(),
         deadline=deadline
     )
-    
+
     if auto_decompose:
         goal.sub_tasks = decompose_goal_with_llm(title, description, goal_type, context)
-    
+
     return goal
 
 
 def get_next_actionable_task(goal: Goal) -> Optional[SubTask]:
     """
-    Get the next actionable item. 
+    Get the next actionable item.
     """
     completed_ids = {t.id for t in goal.sub_tasks if t.status == "completed"}
-    
+
     for task in goal.sub_tasks:
         if task.status != "pending":
             continue

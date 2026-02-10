@@ -11,28 +11,28 @@ import json
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from core.event_sourcing import EVENT_LOG_PATH, rebuild_state
+from core.event_sourcing import EVENT_LOG_PATH
 from core.llm_adapter import get_llm
 
 
 def load_events_for_period(days: int = 7) -> List[Dict[str, Any]]:
     """
     Load events for the specified period.
-    
+
     Args:
         days: Number of days to look back (default: 7 for weekly report)
-    
+
     Returns:
         List of event dictionaries.
     """
     if not EVENT_LOG_PATH.exists():
         return []
-    
+
     cutoff_date = datetime.now() - timedelta(days=days)
     events = []
-    
+
     with open(EVENT_LOG_PATH, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -54,14 +54,14 @@ def load_events_for_period(days: int = 7) -> List[Dict[str, Any]]:
                     events.append(event)
             except json.JSONDecodeError:
                 continue
-    
+
     return events
 
 
 def analyze_completion_stats(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Analyze task completion statistics.
-    
+
     Returns:
         Statistics dictionary with completion rates and counts.
     """
@@ -74,59 +74,59 @@ def analyze_completion_stats(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         "completion_rate": 0.0,
         "by_priority": defaultdict(lambda: {"completed": 0, "failed": 0})
     }
-    
+
     for event in events:
         event_type = event.get("type", "")
-        
+
         if event_type == "task_completed":
             stats["total_tasks"] += 1
             stats["completed"] += 1
-        
+
         elif event_type == "task_failed":
             stats["total_tasks"] += 1
             stats["failed"] += 1
-            
+
             failure_type = event.get("failure_type", "unknown")
             if failure_type == "skipped":
                 stats["skipped"] += 1
             elif failure_type == "blocked":
                 stats["blocked"] += 1
-    
+
     # 计算完成率
     if stats["total_tasks"] > 0:
         stats["completion_rate"] = round(
             stats["completed"] / stats["total_tasks"], 2
         )
-    
+
     # 转换 defaultdict
     stats["by_priority"] = dict(stats["by_priority"])
-    
+
     return stats
 
 
 def identify_failure_patterns(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Identify recurring failure patterns.
-    
+
     Returns:
         List of identified patterns with suggestions.
     """
     patterns = []
     failure_reasons = defaultdict(list)
-    
+
     for event in events:
         if event.get("type") != "task_failed":
             continue
-        
+
         task_id = event.get("task_id", "")
         reason = event.get("reason", "")
         failure_type = event.get("failure_type", "unknown")
-        
+
         failure_reasons[failure_type].append({
             "task_id": task_id,
             "reason": reason
         })
-    
+
     # 分析模式
     for failure_type, failures in failure_reasons.items():
         if len(failures) >= 2:  # 至少 2 次才算模式（经验值）
@@ -137,7 +137,7 @@ def identify_failure_patterns(events: List[Dict[str, Any]]) -> List[Dict[str, An
                 "suggestion": _get_failure_suggestion(failure_type)
             }
             patterns.append(pattern)
-    
+
     return patterns
 
 
@@ -155,12 +155,12 @@ def _get_failure_suggestion(failure_type: str) -> str:
 def calculate_activity_trend(events: List[Dict[str, Any]]) -> Dict[str, int]:
     """
     Calculate daily activity trend.
-    
+
     Returns:
         Dict mapping date strings to event counts.
     """
     daily_counts = defaultdict(int)
-    
+
     for event in events:
         timestamp_str = event.get("timestamp", "")
         if timestamp_str:
@@ -170,22 +170,22 @@ def calculate_activity_trend(events: List[Dict[str, Any]]) -> Dict[str, int]:
                 daily_counts[date_str] += 1
             except ValueError:
                 continue
-    
+
     return dict(daily_counts)
 
 
 def generate_report(days: int = 7) -> Dict[str, Any]:
     """
     Generate a comprehensive retrospective report.
-    
+
     Args:
         days: Period to analyze (default: 7 days)
-    
+
     Returns:
         Report dictionary with all analytics.
     """
     events = load_events_for_period(days)
-    
+
     report = {
         "period": {
             "days": days,
@@ -198,22 +198,22 @@ def generate_report(days: int = 7) -> Dict[str, Any]:
         "activity_trend": calculate_activity_trend(events),
         "event_count": len(events)
     }
-    
+
     return report
 
 
 def generate_ai_insights(report: Dict[str, Any]) -> str:
     """
     Use LLM to generate human-readable insights from the report.
-    
+
     Args:
         report: The analysis report.
-    
+
     Returns:
         AI-generated insights text.
     """
     llm = get_llm("long_memory")
-    
+
     if llm.get_model_name() == "rule_based":
         # 规则模式：生成简单摘要
         stats = report.get("statistics", {})
@@ -224,7 +224,7 @@ def generate_ai_insights(report: Dict[str, Any]) -> str:
 - 受阻任务: {stats.get('blocked', 0)}
 
 建议：关注失败模式，调整任务策略。"""
-    
+
     # LLM 模式：生成详细洞察
     prompt = f"""分析以下 AI Life OS 执行报告，生成简洁的改进建议：
 
@@ -235,18 +235,18 @@ def generate_ai_insights(report: Dict[str, Any]) -> str:
 2. 识别最大的瓶颈
 3. 给出 1-2 个具体可行的改进建议
 """
-    
+
     system_prompt = """你是 AI Life OS 的复盘助手。
 分析用户的执行数据，给出客观、可行的改进建议。
 保持简洁，避免空洞的建议。"""
-    
+
     response = llm.generate(
         prompt=prompt,
         system_prompt=system_prompt,
         temperature=0.5,
         max_tokens=500
     )
-    
+
     if response.success:
         return response.content
     else:
@@ -256,7 +256,7 @@ def generate_ai_insights(report: Dict[str, Any]) -> str:
 def weekly_retrospective() -> Dict[str, Any]:
     """
     Generate a complete weekly retrospective with AI insights.
-    
+
     Returns:
         Full retrospective report with insights.
     """
@@ -272,7 +272,6 @@ def _guardian_rhythm(events: List[Dict[str, Any]], days: int) -> Dict[str, Any]:
     daily = calculate_activity_trend(events)
     if not daily:
         return {"broken": False, "summary": "本周期无执行记录。"}
-    sorted_dates = sorted(daily.keys())
     start = datetime.now().date() - timedelta(days=days)
     expected_dates = [
         (start + timedelta(days=i)).strftime("%Y-%m-%d")
@@ -299,7 +298,13 @@ def _guardian_alignment(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         pass
     goal_ids_from_events = set()
     for ev in events:
-        if ev.get("type") in ("goal_confirmed", "goal_rejected", "goal_completed", "goal_feedback", "goal_action"):
+        if ev.get("type") in (
+            "goal_confirmed",
+            "goal_rejected",
+            "goal_completed",
+            "goal_feedback",
+            "goal_action",
+        ):
             goal_ids_from_events.add(ev.get("goal_id", ""))
     if not registry or not goal_ids_from_events:
         return {"deviated": False, "summary": "暂无目标层级数据或相关事件。"}
@@ -317,8 +322,13 @@ def _guardian_alignment(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         return False
     linked = sum(1 for gid in goal_ids_from_events if gid and under_vision_or_objective(gid))
     rejected = sum(1 for ev in events if ev.get("type") == "goal_rejected")
-    deviated = rejected > 0 or (linked > 0 and sum(1 for ev in events if ev.get("type") == "goal_completed") < linked)
-    summary = "执行与愿景/目标方向一致。" if not deviated else "存在拒绝或未完成与愿景相关的目标，可回顾当前重心。"
+    completed = sum(1 for ev in events if ev.get("type") == "goal_completed")
+    deviated = rejected > 0 or (linked > 0 and completed < linked)
+    summary = (
+        "执行与愿景/目标方向一致。"
+        if not deviated
+        else "存在拒绝或未完成与愿景相关的目标，可回顾当前重心。"
+    )
     return {"deviated": deviated, "summary": summary}
 
 
@@ -353,7 +363,12 @@ def _guardian_observations(
     if rhythm.get("broken"):
         out.append(rhythm.get("summary", "本周期内存在多日无执行记录，节律可能断裂。"))
     if alignment.get("deviated"):
-        out.append(alignment.get("summary", "部分与愿景相关的目标被跳过或拒绝，可回顾是否与当前重心一致。"))
+        out.append(
+            alignment.get(
+                "summary",
+                "部分与愿景相关的目标被跳过或拒绝，可回顾是否与当前重心一致。",
+            )
+        )
     if friction.get("repeated_skip"):
         out.append(friction.get("summary", "存在多次跳过任务，建议拆分为更小步骤或调整优先级。"))
     if not out:
@@ -410,7 +425,11 @@ def build_guardian_retrospective_response(days: int = 7) -> Dict[str, Any]:
     """
     raw = generate_guardian_retrospective(days)
     level = get_intervention_level()
-    suggestion = (raw["observations"][0] if raw["observations"] else "") if level != "OBSERVE_ONLY" else ""
+    suggestion = (
+        (raw["observations"][0] if raw["observations"] else "")
+        if level != "OBSERVE_ONLY"
+        else ""
+    )
     display = level in ("SOFT", "ASK")
     require_confirm = level == "ASK"
     raw["intervention_level"] = level

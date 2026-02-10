@@ -9,7 +9,7 @@ This module implements the core event sourcing logic:
 import json
 import logging
 from datetime import datetime, date
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict
 
 # Core Data Models
 from core.models import UserProfile, Goal, Task, Execution, GoalStatus, TaskStatus
@@ -52,9 +52,9 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
     event_type = event.get("type")
     payload = event.get("payload", {})
     timestamp = event.get("timestamp")
-    
+
     # --- Profile Events ---
-    
+
     if event_type == "profile_updated":
         # payload: { "field": "occupation", "value": "coder" }
         field_name = payload.get("field")
@@ -64,15 +64,15 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
         if field_name:
             state.setdefault("identity", {})
             state["identity"][field_name] = value
-            
+
     elif event_type == "onboarding_completed":
         state["profile"].onboarding_completed = True
-        
+
     elif event_type == "preferences_updated":
         state["profile"].preferences.update(payload.get("preferences", {}))
-        
+
     # --- Goal Events ---
-    
+
     elif event_type == "goal_created":
         # payload: { "goal": {...} }
         goal_data = payload.get("goal")
@@ -88,7 +88,7 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
                 except ValueError:
                     pass
             state["goals"].append(goal)
-            
+
     elif event_type == "goal_updated":
         # payload: { "id": "...", "updates": {...} }
         goal_id = payload.get("id")
@@ -107,7 +107,7 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
                                 pass
                         setattr(goal, k, v)
                 break
-                
+
     elif event_type == "goal_confirmed":
         # payload: { "id": "..." }
         goal_id = payload.get("id")
@@ -118,7 +118,7 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
                 break
 
     # --- Task Events ---
-    
+
     elif event_type == "task_created":
         # payload: { "task": {...} }
         task_data = payload.get("task")
@@ -133,7 +133,7 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
                 except ValueError:
                     pass
             state["tasks"].append(task)
-            
+
     elif event_type == "task_updated":
         task_id = payload.get("id")
         updates = payload.get("updates", {})
@@ -145,16 +145,16 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
                             v = TaskStatus(v)
                         setattr(task, k, v)
                 break
-                
+
     # --- Execution Events ---
-    
+
     elif event_type == "execution_started":
         # payload: { "execution": {...} }
         exec_data = payload.get("execution")
         if exec_data:
             execution = Execution(**exec_data)
             state["executions"].append(execution)
-            
+
     elif event_type == "execution_completed":
         exec_id = payload.get("id")
         outcome = payload.get("outcome")
@@ -180,10 +180,10 @@ def rebuild_state() -> Dict[str, Any]:
     Rebuild state from event log.
     """
     state = get_initial_state()
-    
+
     if not EVENT_LOG_PATH.exists():
         return state
-    
+
     with open(EVENT_LOG_PATH, "r", encoding="utf-8") as f:
         for line in f:
             if not line.strip():
@@ -194,7 +194,7 @@ def rebuild_state() -> Dict[str, Any]:
             except Exception as e:
                 logger.error(f"Failed to process event: {line[:100]}... Error: {e}")
                 continue
-                
+
     return state
 
 def append_event(event: Dict[str, Any]) -> None:
@@ -204,12 +204,12 @@ def append_event(event: Dict[str, Any]) -> None:
     """
     if "timestamp" not in event:
         event["timestamp"] = datetime.now().isoformat()
-    
+
     EVENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    
+
     with open(EVENT_LOG_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
-    
+
     from core.snapshot_manager import create_snapshot, should_create_snapshot
     if event.get("type") == "time_tick":
         create_snapshot(force=True)
