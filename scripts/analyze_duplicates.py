@@ -3,7 +3,13 @@ import json
 from collections import Counter
 from pathlib import Path
 
-DATA_DIR = Path(__file__).parent.parent / "data"
+import sys
+
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.paths import DATA_DIR
+
 EVENT_LOG_PATH = DATA_DIR / "event_log.jsonl"
 
 def analyze():

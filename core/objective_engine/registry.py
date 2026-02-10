@@ -1,14 +1,14 @@
 """
 GoalRegistry: in-memory store of Vision/Objective/Goal nodes with JSON persistence.
-Path: data/goal_registry.json (aligned with tools/reset_system.py).
+Path: <AI_LIFE_OS_DATA_DIR>/goal_registry.json (or ./data by default).
 """
 from pathlib import Path
 from typing import List, Optional
 import json
 
 from core.objective_engine.models import ObjectiveNode, GoalLayer, GoalState
+from core.paths import DATA_DIR
 
-DATA_DIR = Path(__file__).parent.parent.parent / "data"
 REGISTRY_PATH = DATA_DIR / "goal_registry.json"
 
 

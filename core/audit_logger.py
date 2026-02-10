@@ -1,4 +1,4 @@
-"""
+﻿"""
 Audit Logger for AI Life OS.
 
 Records all AI decisions with complete reasoning chain.
@@ -6,13 +6,11 @@ Supports querying historical decisions and generating reports.
 """
 import json
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, asdict
+from core.paths import DATA_DIR
 
-
-# 审计日志目录
-DATA_DIR = Path(__file__).parent.parent / "data"
+# Audit log paths
 AUDIT_LOG_PATH = DATA_DIR / "audit_log.jsonl"
 
 
@@ -98,7 +96,7 @@ def query_decisions(
     Args:
         decision_type: Filter by decision type
         action_id: Filter by action ID
-        limit: Maximum number of results (default: 100, 经验值)
+        limit: Maximum number of results (default: 100)
     
     Returns:
         List of matching audit entries.
@@ -116,11 +114,11 @@ def query_decisions(
             try:
                 entry = json.loads(line)
                 
-                # 跳过 outcome_update 条目
+                # Skip outcome_update records
                 if entry.get("type") == "outcome_update":
                     continue
                 
-                # 应用过滤器
+                # Apply filters
                 if decision_type and entry.get("decision_type") != decision_type:
                     continue
                 if action_id and entry.get("action_id") != action_id:
@@ -131,7 +129,7 @@ def query_decisions(
             except json.JSONDecodeError:
                 continue
     
-    # 返回最近的条目
+    # Return latest entries
     return results[-limit:]
 
 
@@ -219,7 +217,7 @@ def clear_old_audit_logs(retention_days: int = 90) -> int:
     Clear audit logs older than retention period.
     
     Args:
-        retention_days: Days to retain (default: 90, 经验值)
+        retention_days: Days to retain (default: 90)
     
     Returns:
         Number of entries removed.
@@ -230,7 +228,7 @@ def clear_old_audit_logs(retention_days: int = 90) -> int:
     from datetime import timedelta
     cutoff = datetime.now() - timedelta(days=retention_days)
     
-    # 读取所有条目
+    # Read all entries
     entries = []
     removed = 0
     
@@ -253,9 +251,10 @@ def clear_old_audit_logs(retention_days: int = 90) -> int:
             except (json.JSONDecodeError, ValueError):
                 continue
     
-    # 重写文件
+    # Rewrite file
     with open(AUDIT_LOG_PATH, "w", encoding="utf-8") as f:
         for entry in entries:
             f.write(entry + "\n")
     
     return removed
+

@@ -80,14 +80,28 @@ async def get_state():
     """Get the full system state for the UI."""
     steward = get_steward()
     system_state = steward.state
-    
+
     registry = steward.registry
-    
+
+    identity = system_state.get("identity")
+    if not identity and system_state.get("profile") is not None:
+        profile = system_state["profile"]
+        identity = dict(profile if isinstance(profile, dict) else profile.__dict__)
+
+    active_tasks = system_state.get("ongoing", {}).get("active_tasks")
+    if active_tasks is None:
+        tasks = system_state.get("tasks", [])
+        active_tasks = [
+            asdict(t)
+            for t in tasks
+            if str(getattr(getattr(t, "status", None), "value", getattr(t, "status", ""))) == "pending"
+        ]
+
     response = {
-        "identity": system_state.get("identity"),
-        "metrics": system_state.get("rhythm"),
+        "identity": identity,
+        "metrics": system_state.get("rhythm") or {},
         "energy_phase": steward.get_current_phase(),
-        "active_tasks": system_state.get("ongoing", {}).get("active_tasks", []),
+        "active_tasks": active_tasks,
         "visions": [asdict(v) for v in registry.visions],
         "objectives": [asdict(o) for o in registry.objectives],
         "goals": [asdict(g) for g in registry.goals],
@@ -97,7 +111,7 @@ async def get_state():
         ],
         "system_health": {
             "status": "nominal", 
-            "queue_load": len(system_state.get("ongoing", {}).get("active_tasks", []))
+            "queue_load": len(active_tasks)
         },
         "weekly_review_due": _has_review_due_this_week(),
     }

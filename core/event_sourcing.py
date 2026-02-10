@@ -1,4 +1,4 @@
-"""
+﻿"""
 Event Sourcing Engine for AI Life OS.
 
 This module implements the core event sourcing logic:
@@ -9,14 +9,13 @@ This module implements the core event sourcing logic:
 import json
 import logging
 from datetime import datetime, date
-from pathlib import Path
 from typing import Any, Dict, Optional, List
 
 # Core Data Models
 from core.models import UserProfile, Goal, Task, Execution, GoalStatus, TaskStatus
+from core.paths import DATA_DIR
 
-# 数据文件路径
-DATA_DIR = Path(__file__).parent.parent / "data"
+# Data file paths
 EVENT_LOG_PATH = DATA_DIR / "event_log.jsonl"
 STATE_SNAPSHOT_PATH = DATA_DIR / "character_state.json"
 
@@ -30,6 +29,11 @@ def get_initial_state() -> Dict[str, Any]:
     """
     return {
         "profile": UserProfile(),
+        # Compatibility view for modules/tests that still read legacy keys.
+        "identity": {},
+        "rhythm": {},
+        "ongoing": {"active_tasks": []},
+        "time_state": {"current_date": "", "previous_date": ""},
         "goals": [], # List[Goal]
         "tasks": [], # List[Task]
         "executions": [], # List[Execution]
@@ -57,6 +61,9 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
         value = payload.get("value")
         if hasattr(state["profile"], field_name):
             setattr(state["profile"], field_name, value)
+        if field_name:
+            state.setdefault("identity", {})
+            state["identity"][field_name] = value
             
     elif event_type == "onboarding_completed":
         state["profile"].onboarding_completed = True
@@ -208,3 +215,5 @@ def append_event(event: Dict[str, Any]) -> None:
         create_snapshot(force=True)
     elif should_create_snapshot():
         create_snapshot()
+
+

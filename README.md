@@ -5,95 +5,95 @@
 
 [English Documentation](README.md) | [中文文档](README_zh.md)
 
-**AI Life OS** is an AI-driven personal operating system designed to treat the user as an "Executive Avatar" in the real world, with AI acting as the strategic planner. It helps manage time, habits, and goals through intelligent planning and retrospective analysis.
+AI Life OS is an AI-driven personal operating system that helps manage time, habits, and goals through planning and retrospective analysis.
 
-This repository contains **runnable code and documentation only** (no internal task plans or archives).
+This repository contains runnable code and documentation only.
 
-## ✨ Key Features
+## Key Features
 
-- **🧠 Auditable Planner**
-  - Generates daily action plans based on current state, time, and energy levels.
-  - Every AI decision comes with a logged rationale (Decision Reason).
+- Auditable planner with explicit decision reasons
+- Habit tracking and rhythm analysis from event logs
+- Privacy-first model integration (local Ollama supported)
+- Event-sourcing based state and snapshot recovery
 
-- **📊 Habit Tracking & Analysis**
-  - Automatically detects behavioral patterns from event logs.
-  - Distinguishes between "Maintenance Rhythm" and "Exploration Tasks".
+## Repository Structure
 
-- **🔒 Privacy First**
-  - **Local First**: Optimized for local Ollama models (Mistral, Qwen) to keep data private.
-  - **Config Isolation**: Sensitive keys and personal data are strictly isolated.
+- `core/`: Goal engine, event sourcing, LLM adapter, retrospective, rhythm logic
+- `config/`: Model config, prompts, blueprint/system rules
+- `web/`: FastAPI backend and Vite/React frontend
+- `docs/`: Architecture and concept docs
+- `cli/`, `interface/`, `scheduler/`, `scripts/`, `tools/`: Utilities and entrypoints
 
-- **🛡️ Robust Architecture**
-  - **Event Sourcing**: System state is derived from an immutable event log.
-  - **RIPER Principles**: Strict causal chain error handling.
-
-## 📁 Repository Contents
-
-- **core/** — Goal engine, event sourcing, LLM adapter, retrospective, rhythm detection.
-- **config/** — Blueprint, model, prompts; use `config/model.example.yaml` → `config/local_model.yaml` for private keys.
-- **web/** — Backend (FastAPI) and frontend (Vite/React) for dashboard and onboarding.
-- **docs/** — Architecture and concept docs.
-- **cli/, interface/, scheduler/, scripts/, tools/** — Entrypoints and utilities.
-
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Prerequisites
 
-Ensure Python 3.8+ is installed.
+Install Python 3.8+.
 
 ```bash
-# Clone repository (replace with your repo URL if forking)
-git clone https://github.com/yourusername/ai-life-os.git
-cd ai-life-os
-
-# Create virtual environment
 python -m venv .venv
-
-# Activate (Windows)
-.\.venv\Scripts\activate
-# Activate (Linux/Mac)
-source .venv/bin/activate
-
-# Install dependencies
+.\.venv\Scripts\activate   # Windows
+# source .venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 ```
 
-### 2. Configuration
+### 2. Model Configuration
 
-Supports both OpenAI and local Ollama models.
+```bash
+copy config/model.example.yaml config/local_model.yaml
+```
 
-1. Create local config:
-   ```bash
-   # Windows PowerShell
-   copy config/model.example.yaml config/local_model.yaml
-   ```
+Edit `config/local_model.yaml`:
 
-2. Edit `config/local_model.yaml`:
-   ```yaml
-   # Recommended: Local Ollama
-   provider: ollama
-   base_url: "http://localhost:11434"
-   model_name: "mistral:latest"
-   ```
+```yaml
+provider: ollama
+base_url: "http://localhost:11434"
+model_name: "mistral:latest"
+```
 
-### 3. Run
+### 3. Runtime Environment (optional)
+
+Copy `.env.example` to `.env` and adjust if needed.
+
+Important runtime env vars:
+
+- `AI_LIFE_OS_DATA_DIR`: isolate runtime data directory (default `./data`)
+- `AI_LIFE_OS_ALLOWED_ORIGINS`: comma-separated CORS origins
+- `AI_LIFE_OS_HOST`: backend bind host (default `0.0.0.0`)
+- `AI_LIFE_OS_PORT`: backend port (default `8010`)
+- `AI_LIFE_OS_RELOAD`: enable hot reload (`1` for dev, default `0`)
+- `AI_LIFE_OS_DISABLE_WATCHERS`: disable background watchers (useful in tests)
+
+### 4. Run
 
 ```bash
 python main.py
 ```
 
-On first run, the system enters **Cold Start Mode** to guide you through setting up your initial profile (City, Occupation, etc.).
+## Data Migration
 
-## 📖 Usage Guide
+To move runtime data from `./data` to a custom directory:
 
-- **Daily Check-in**: Run `main.py` to view today's plan and report progress.
-- **Weekly Review**: Automatically triggers a retrospective analysis on Sundays (configurable).
-- **Snapshots**: Data is safely persisted in the `data/` directory using event sourcing and snapshots.
+```bash
+python tools/migrate_data_dir.py --dest D:\ai-life-os-data
+```
 
-## 🛠️ Contributing
+After migration, set:
 
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+```bash
+AI_LIFE_OS_DATA_DIR=D:\ai-life-os-data
+```
 
-## 📜 License
+## Usage Notes
 
-This project is licensed under the [MIT License](LICENSE).
+- Daily check-in: run `main.py`, then use the dashboard/API
+- Weekly review: retrospective events are generated by scheduler rules
+- Snapshots and logs are stored under `AI_LIFE_OS_DATA_DIR` (or `data/`)
+
+## Contributing
+
+See `CONTRIBUTING.md`.
+
+## License
+
+MIT. See `LICENSE`.

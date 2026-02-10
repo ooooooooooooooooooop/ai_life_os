@@ -49,7 +49,6 @@ def get_status():
         # 说明刚好答完，需要触发完成事件
         append_event({
             "type": "onboarding_completed",
-            "timestamp": None
         })
         return OnboardStatus(completed=True, profile=profile.__dict__)
         
@@ -78,8 +77,7 @@ def submit_answer(request: OnboardRequest):
         "payload": {
             "field": field,
             "value": request.answer
-        },
-        "timestamp": None
+        }
     })
     
     return get_status()
