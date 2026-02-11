@@ -95,5 +95,5 @@ class TaskDecomposer:
             cleaned = content.replace("```json", "").replace("```", "").strip()
             return json.loads(cleaned)
         except json.JSONDecodeError:
-            logger.warn(f"Failed to parse JSON task list: {content}")
+            logger.warning(f"Failed to parse JSON task list: {content}")
             return []

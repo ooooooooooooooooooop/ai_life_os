@@ -142,7 +142,7 @@ class GoalGenerator:
             cleaned = content.replace("```json", "").replace("```", "").strip()
             return json.loads(cleaned)
         except json.JSONDecodeError:
-            logger.warn(f"Failed to parse JSON from LLM: {content}")
+            logger.warning(f"Failed to parse JSON from LLM: {content}")
             return []
 
     def decompose_to_children(
