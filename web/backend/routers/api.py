@@ -39,6 +39,12 @@ class ActionRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class RetrospectiveConfirmRequest(BaseModel):
+    days: int = 7
+    fingerprint: Optional[str] = None
+    note: Optional[str] = None
+
+
 def get_steward() -> Steward:
     state = ensure_tick_applied()
     registry = GoalRegistry()
@@ -93,7 +99,7 @@ def _normalized_audit(
     if not isinstance(used_state_fields, list):
         used_state_fields = []
 
-    return {
+    normalized = {
         "strategy": audit.get("strategy") or default_strategy,
         "used_state_fields": used_state_fields,
         "decision_reason": {
@@ -102,6 +108,11 @@ def _normalized_audit(
             "risk": decision_reason.get("risk") or default_risk,
         },
     }
+    # Preserve extension fields used by planner-level guards (e.g., Anchor).
+    for extra_key in ("anchor",):
+        if extra_key in audit:
+            normalized[extra_key] = audit.get(extra_key)
+    return normalized
 
 
 @router.get("/state")
@@ -137,6 +148,8 @@ async def get_state():
         default_strategy="state_projection",
         default_trigger="State requested by API client",
     )
+    retrospective = build_guardian_retrospective_response(days=7)
+    guardian_state = system_state.get("guardian") or {}
 
     return {
         "identity": identity,
@@ -156,6 +169,14 @@ async def get_state():
             "queue_load": len(active_tasks),
         },
         "weekly_review_due": _has_review_due_this_week(),
+        "guardian": {
+            "intervention_level": retrospective.get("intervention_level"),
+            "pending_confirmation": bool(retrospective.get("require_confirm")),
+            "confirmation_action": retrospective.get("confirmation_action", {}),
+            "last_intervention_confirmation": guardian_state.get(
+                "last_intervention_confirmation"
+            ),
+        },
         "audit": state_audit,
         "meta": {
             "event_schema_version": EVENT_SCHEMA_VERSION,
@@ -167,6 +188,50 @@ async def get_state():
 @router.get("/retrospective")
 async def get_retrospective(days: int = 7):
     return build_guardian_retrospective_response(days)
+
+
+@router.post("/retrospective/confirm")
+async def confirm_retrospective_intervention(request: RetrospectiveConfirmRequest):
+    days = request.days or 7
+    current_payload = build_guardian_retrospective_response(days)
+    action = current_payload.get("confirmation_action") or {}
+    current_fingerprint = action.get("fingerprint")
+
+    if request.fingerprint and current_fingerprint and request.fingerprint != current_fingerprint:
+        raise HTTPException(
+            status_code=409,
+            detail="Intervention context changed, refresh retrospective before confirming",
+        )
+
+    if not action.get("required"):
+        return {
+            "status": "noop",
+            "reason": "confirmation_not_required",
+            "retrospective": current_payload,
+        }
+
+    if action.get("confirmed"):
+        return {"status": "already_confirmed", "retrospective": current_payload}
+
+    append_event(
+        {
+            "type": "guardian_intervention_confirmed",
+            "timestamp": datetime.now().isoformat(),
+            "payload": {
+                "days": days,
+                "fingerprint": current_fingerprint,
+                "suggestion": current_payload.get("suggestion", ""),
+                "signals": [
+                    source.get("signal")
+                    for source in current_payload.get("suggestion_sources", [])
+                ],
+                "note": request.note or "",
+            },
+        }
+    )
+
+    updated_payload = build_guardian_retrospective_response(days)
+    return {"status": "confirmed", "retrospective": updated_payload}
 
 
 @router.get("/visions")

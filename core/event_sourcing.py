@@ -38,6 +38,7 @@ def get_initial_state() -> Dict[str, Any]:
         "rhythm": {},
         "ongoing": {"active_tasks": []},
         "time_state": {"current_date": "", "previous_date": ""},
+        "guardian": {"last_intervention_confirmation": None},
         "goals": [], # List[Goal]
         "tasks": [], # List[Task]
         "executions": [], # List[Execution]
@@ -175,6 +176,13 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
             "previous_date": event.get("previous_date", ""),
         }
 
+    elif event_type == "guardian_intervention_confirmed":
+        state.setdefault("guardian", {})
+        state["guardian"]["last_intervention_confirmation"] = {
+            "timestamp": timestamp,
+            "payload": payload if isinstance(payload, dict) else {},
+        }
+
     return state
 
 # --- Core Functions ---
@@ -246,4 +254,3 @@ def append_event(event: Dict[str, Any]) -> None:
         create_snapshot(force=True)
     elif should_create_snapshot():
         create_snapshot()
-

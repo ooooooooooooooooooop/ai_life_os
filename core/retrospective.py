@@ -8,6 +8,7 @@ GuardianRetrospective: derived view from event_log (read-only), four dimensions:
 rhythm, alignment, friction, observations.
 """
 import json
+import hashlib
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -588,6 +589,57 @@ def get_intervention_level() -> str:
     return "SOFT"
 
 
+def _build_confirmation_fingerprint(raw: Dict[str, Any]) -> str:
+    """
+    Build a stable fingerprint for current intervention context.
+    Used to make ASK confirmations replayable and idempotent.
+    """
+    active_signals = []
+    for signal in raw.get("deviation_signals", []):
+        if not signal.get("active"):
+            continue
+        active_signals.append(
+            {
+                "name": signal.get("name"),
+                "severity": signal.get("severity"),
+                "count": signal.get("count", 0),
+                "threshold": signal.get("threshold"),
+            }
+        )
+
+    payload = {
+        "days": (raw.get("period") or {}).get("days"),
+        "suggestion": (raw.get("observations") or [""])[0] if raw.get("observations") else "",
+        "signals": active_signals,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return f"gcf_{hashlib.sha256(encoded).hexdigest()[:16]}"
+
+
+def _find_confirmation_event(
+    events: List[Dict[str, Any]],
+    days: int,
+    fingerprint: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Find the latest matching ASK confirmation event in current lookback window.
+    """
+    for event in reversed(events):
+        if event.get("type") != "guardian_intervention_confirmed":
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        payload_days = payload.get("days")
+        if payload_days is not None:
+            try:
+                if int(payload_days) != int(days):
+                    continue
+            except (TypeError, ValueError):
+                continue
+        if payload.get("fingerprint") == fingerprint:
+            return event
+    return None
+
+
 def build_guardian_retrospective_response(days: int = 7) -> Dict[str, Any]:
     """
     返回带干预权限字段的复盘响应，供 API 使用。
@@ -614,9 +666,26 @@ def build_guardian_retrospective_response(days: int = 7) -> Dict[str, Any]:
         for signal in raw.get("deviation_signals", [])
         if signal.get("active")
     ]
+    fingerprint = _build_confirmation_fingerprint(raw)
+    events = load_events_for_period(days)
+    confirmation_event = _find_confirmation_event(
+        events=events, days=days, fingerprint=fingerprint
+    )
+    confirmed = confirmation_event is not None
+    confirmation_required = level == "ASK" and display and bool(suggestion)
+    require_confirm = confirmation_required and not confirmed
+
     raw["intervention_level"] = level
     raw["suggestion"] = suggestion
     raw["display"] = display
     raw["require_confirm"] = require_confirm
     raw["suggestion_sources"] = suggestion_sources
+    raw["confirmation_action"] = {
+        "required": confirmation_required,
+        "confirmed": confirmed,
+        "confirmed_at": confirmation_event.get("timestamp") if confirmed else None,
+        "endpoint": "/api/v1/retrospective/confirm",
+        "method": "POST",
+        "fingerprint": fingerprint,
+    }
     return raw
