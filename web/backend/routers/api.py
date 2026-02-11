@@ -211,6 +211,7 @@ async def get_state():
                 "event_log.review_due",
                 "anchor.current",
                 "retrospective.alignment.trend",
+                "retrospective.l2_protection",
             ],
             "decision_reason": {
                 "trigger": "State requested by API client",
@@ -225,6 +226,7 @@ async def get_state():
     guardian_state = system_state.get("guardian") or {}
     alignment_summary = service.summarize_alignment(registry.objectives + registry.goals)
     alignment_trend = (retrospective.get("alignment") or {}).get("trend", {})
+    l2_protection = retrospective.get("l2_protection") or {}
     anchor_snapshot = _anchor_payload(None)
     try:
         anchor = AnchorManager().get_current()
@@ -263,6 +265,12 @@ async def get_state():
             "last_intervention_confirmation": guardian_state.get(
                 "last_intervention_confirmation"
             ),
+            "metrics": {
+                "l2_protection_rate": l2_protection.get("ratio"),
+                "l2_protection_level": l2_protection.get("level"),
+                "l2_protection_summary": l2_protection.get("summary"),
+                "l2_protection_trend": l2_protection.get("trend", []),
+            },
         },
         "audit": state_audit,
         "meta": {

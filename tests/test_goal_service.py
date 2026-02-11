@@ -182,6 +182,12 @@ def test_state_endpoint_includes_stable_audit_shape(monkeypatch):
         lambda days=7: {
             "intervention_level": "ASK",
             "require_confirm": True,
+            "l2_protection": {
+                "ratio": 0.6,
+                "level": "medium",
+                "summary": "L2 保护一般",
+                "trend": [],
+            },
             "confirmation_action": {
                 "required": True,
                 "confirmed": False,
@@ -201,6 +207,7 @@ def test_state_endpoint_includes_stable_audit_shape(monkeypatch):
     assert payload["guardian"]["intervention_level"] == "ASK"
     assert payload["guardian"]["pending_confirmation"] is True
     assert payload["guardian"]["confirmation_action"]["endpoint"] == "/api/v1/retrospective/confirm"
+    assert payload["guardian"]["metrics"]["l2_protection_rate"] == 0.6
     assert "alignment" in payload
     assert "goal_summary" in payload["alignment"]
     assert payload["meta"]["event_schema_version"] == event_sourcing.EVENT_SCHEMA_VERSION

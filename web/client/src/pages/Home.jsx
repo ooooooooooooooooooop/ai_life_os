@@ -317,6 +317,17 @@ export default function Home() {
     const effectDeltaLabel = hasEffectDelta
         ? `${effectAfterAvg - effectBeforeAvg >= 0 ? '+' : ''}${(effectAfterAvg - effectBeforeAvg).toFixed(1)}`
         : '--';
+    const l2ProtectionRatio = Number(retrospective?.l2_protection?.ratio);
+    const l2ProtectionLabel = Number.isFinite(l2ProtectionRatio)
+        ? `${Math.round(l2ProtectionRatio * 100)}%`
+        : '--';
+    const l2ProtectionLevel = retrospective?.l2_protection?.level || 'unknown';
+    const l2ProtectionColorMap = {
+        high: '#86efac',
+        medium: '#fcd34d',
+        low: '#fca5a5',
+        unknown: '#cbd5e1'
+    };
 
     if (loading) {
         return (
@@ -663,6 +674,28 @@ export default function Home() {
                         <p style={{ margin: '0 0 0.75rem 0' }}>
                             {retrospective.observations?.[0] ?? retrospective.rhythm?.summary ?? '本周期暂无总结'}
                         </p>
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.03)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>L2 保护率</div>
+                                <div style={{ fontSize: '0.9rem', fontWeight: 700, color: l2ProtectionColorMap[l2ProtectionLevel] || l2ProtectionColorMap.unknown }}>
+                                    {l2ProtectionLabel}
+                                </div>
+                            </div>
+                            <div style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                {retrospective.l2_protection?.summary || '暂无 L2 保护数据'}
+                            </div>
+                            <div style={{ marginTop: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                完成 {retrospective.l2_protection?.protected ?? 0} · 中断 {retrospective.l2_protection?.interrupted ?? 0}
+                            </div>
+                        </div>
 
                         {retrospective.display && retrospective.suggestion && (
                             <div style={{

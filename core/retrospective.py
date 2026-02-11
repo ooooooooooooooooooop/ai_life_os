@@ -12,10 +12,10 @@ import hashlib
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.config_manager import config
-from core.event_sourcing import EVENT_LOG_PATH
+from core.event_sourcing import EVENT_LOG_PATH, rebuild_state
 from core.llm_adapter import get_llm
 
 
@@ -233,6 +233,159 @@ def _event_evidence(event: Dict[str, Any], detail: str) -> Dict[str, Any]:
         "type": event.get("type"),
         "timestamp": event.get("timestamp"),
         "detail": detail,
+    }
+
+
+def _extract_task_id_from_event(event: Dict[str, Any]) -> Optional[str]:
+    event_type = event.get("type")
+    if event_type in {"task_failed", "task_completed"}:
+        task_id = event.get("task_id")
+        return str(task_id) if task_id else None
+    if event_type == "task_updated":
+        payload = event.get("payload")
+        if isinstance(payload, dict):
+            task_id = payload.get("id")
+            return str(task_id) if task_id else None
+    return None
+
+
+def _task_outcome_from_event(event: Dict[str, Any]) -> Optional[str]:
+    event_type = event.get("type")
+    if event_type == "task_completed":
+        return "completed"
+    if event_type == "task_failed" and event.get("failure_type") == "skipped":
+        return "skipped"
+    if event_type == "task_updated":
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        updates = payload.get("updates") if isinstance(payload.get("updates"), dict) else {}
+        status = str(updates.get("status", "")).lower()
+        if status == "completed":
+            return "completed"
+        if status == "skipped":
+            return "skipped"
+    return None
+
+
+def _build_l2_reference_maps() -> Tuple[Dict[str, str], Dict[str, str]]:
+    """
+    Build lookup maps for goal type and task->goal relations.
+    Returns:
+        (goal_type_by_goal_id, task_goal_by_task_id)
+    """
+    goal_type_by_goal_id: Dict[str, str] = {}
+    task_goal_by_task_id: Dict[str, str] = {}
+
+    try:
+        from core.objective_engine.registry import GoalRegistry
+
+        registry = GoalRegistry()
+        nodes = registry.visions + registry.objectives + registry.goals
+        for node in nodes:
+            goal_type_by_goal_id[node.id] = str(node.goal_type or "")
+    except Exception:
+        pass
+
+    try:
+        state = rebuild_state()
+        for task in state.get("tasks", []):
+            task_id = str(getattr(task, "id", "") or "")
+            goal_id = str(getattr(task, "goal_id", "") or "")
+            if task_id and goal_id:
+                task_goal_by_task_id[task_id] = goal_id
+    except Exception:
+        pass
+
+    return goal_type_by_goal_id, task_goal_by_task_id
+
+
+def _guardian_l2_protection(events: List[Dict[str, Any]], days: int) -> Dict[str, Any]:
+    """
+    L2 protection ratio:
+    During deep_work window, how many L2 task outcomes are protected (completed)
+    vs interrupted (skipped).
+    """
+    goal_type_by_goal_id, task_goal_by_task_id = _build_l2_reference_maps()
+
+    day_keys = [
+        (datetime.now() - timedelta(days=offset)).strftime("%Y-%m-%d")
+        for offset in reversed(range(days))
+    ]
+    daily = {
+        day: {"protected": 0, "interrupted": 0}
+        for day in day_keys
+    }
+
+    for event in events:
+        event_time = _parse_event_time(event)
+        if event_time is None or _phase_for_time(event_time) != "deep_work":
+            continue
+
+        outcome = _task_outcome_from_event(event)
+        if outcome not in {"completed", "skipped"}:
+            continue
+
+        task_id = _extract_task_id_from_event(event)
+        if not task_id:
+            continue
+        goal_id = task_goal_by_task_id.get(task_id)
+        if not goal_id:
+            continue
+
+        goal_type = str(goal_type_by_goal_id.get(goal_id, "")).upper()
+        if "L2" not in goal_type:
+            continue
+
+        day = event_time.strftime("%Y-%m-%d")
+        if day not in daily:
+            continue
+
+        if outcome == "completed":
+            daily[day]["protected"] += 1
+        elif outcome == "skipped":
+            daily[day]["interrupted"] += 1
+
+    points = []
+    total_protected = 0
+    total_interrupted = 0
+    for day in day_keys:
+        protected = daily[day]["protected"]
+        interrupted = daily[day]["interrupted"]
+        total = protected + interrupted
+        ratio = round(protected / total, 2) if total > 0 else None
+        points.append(
+            {
+                "date": day,
+                "ratio": ratio,
+                "protected": protected,
+                "interrupted": interrupted,
+            }
+        )
+        total_protected += protected
+        total_interrupted += interrupted
+
+    opportunities = total_protected + total_interrupted
+    ratio = round(total_protected / opportunities, 2) if opportunities > 0 else None
+    if ratio is None:
+        level = "unknown"
+        summary = "暂无可计算的 L2 保护数据。"
+    elif ratio >= 0.75:
+        level = "high"
+        summary = "L2 保护表现良好，深度工作时段执行稳定。"
+    elif ratio >= 0.50:
+        level = "medium"
+        summary = "L2 保护一般，仍有中断，建议减少深度时段切换。"
+    else:
+        level = "low"
+        summary = "L2 保护偏弱，深度时段中断较多，建议优先修复。"
+
+    return {
+        "ratio": ratio,
+        "level": level,
+        "protected": total_protected,
+        "interrupted": total_interrupted,
+        "opportunities": opportunities,
+        "summary": summary,
+        "trend": points,
     }
 
 
@@ -611,6 +764,7 @@ def _guardian_observations(
     rhythm: Dict[str, Any],
     alignment: Dict[str, Any],
     friction: Dict[str, Any],
+    l2_protection: Optional[Dict[str, Any]] = None,
     deviation_signals: Optional[List[Dict[str, Any]]] = None,
 ) -> List[str]:
     """1–3 条 Guardian 观察，由三维度派生，不硬编码固定文案。"""
@@ -626,6 +780,9 @@ def _guardian_observations(
         )
     if friction.get("repeated_skip"):
         out.append(friction.get("summary", "存在多次跳过任务，建议拆分为更小步骤或调整优先级。"))
+    if l2_protection:
+        if l2_protection.get("level") in {"low", "medium"}:
+            out.append(l2_protection.get("summary", "L2 保护需要提升。"))
     if deviation_signals:
         active_signal_summaries = [
             s.get("summary")
@@ -652,8 +809,15 @@ def generate_guardian_retrospective(days: int = 7) -> Dict[str, Any]:
     alignment = _guardian_alignment(events)
     alignment["trend"] = _goal_alignment_trend(events, days)
     friction = _guardian_friction(events)
+    l2_protection = _guardian_l2_protection(events, days)
     deviation_signals = _detect_deviation_signals(events, days)
-    observations = _guardian_observations(rhythm, alignment, friction, deviation_signals)
+    observations = _guardian_observations(
+        rhythm,
+        alignment,
+        friction,
+        l2_protection,
+        deviation_signals,
+    )
 
     return {
         "period": {"days": days, "start_date": start_date, "end_date": end_date},
@@ -661,6 +825,7 @@ def generate_guardian_retrospective(days: int = 7) -> Dict[str, Any]:
         "rhythm": rhythm,
         "alignment": alignment,
         "friction": friction,
+        "l2_protection": l2_protection,
         "deviation_signals": deviation_signals,
         "observations": observations,
     }

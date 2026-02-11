@@ -83,17 +83,65 @@ def test_generate_guardian_retrospective_includes_alignment_trend(monkeypatch):
         "_guardian_friction",
         lambda events: {"repeated_skip": False, "delay_signals": False, "summary": "ok"},
     )
+    monkeypatch.setattr(
+        retrospective,
+        "_guardian_l2_protection",
+        lambda events, days: {
+            "ratio": 0.8,
+            "level": "high",
+            "protected": 4,
+            "interrupted": 1,
+            "opportunities": 5,
+            "summary": "good",
+            "trend": [],
+        },
+    )
     monkeypatch.setattr(retrospective, "_detect_deviation_signals", lambda events, days: [])
     monkeypatch.setattr(
         retrospective,
         "_guardian_observations",
-        lambda rhythm, alignment, friction, deviation_signals: ["ok"],
+        lambda rhythm, alignment, friction, l2_protection, deviation_signals: ["ok"],
     )
 
     payload = retrospective.generate_guardian_retrospective(days=7)
     assert "trend" in payload["alignment"]
     assert payload["alignment"]["trend"]["available"] is True
     assert payload["alignment"]["trend"]["active_anchor_version"] == "v1"
+    assert payload["l2_protection"]["ratio"] == 0.8
+
+
+def test_guardian_l2_protection_ratio_uses_deep_work_l2_events(monkeypatch):
+    monkeypatch.setattr(
+        retrospective,
+        "_build_l2_reference_maps",
+        lambda: (
+            {"g_l2": "L2_FLOURISHING", "g_l1": "L1_SUBSTRATE"},
+            {"t1": "g_l2", "t2": "g_l2", "t3": "g_l1"},
+        ),
+    )
+    events = [
+        {
+            "type": "task_updated",
+            "timestamp": "2026-02-10T10:00:00",
+            "payload": {"id": "t1", "updates": {"status": "completed"}},
+        },
+        {
+            "type": "task_updated",
+            "timestamp": "2026-02-10T10:20:00",
+            "payload": {"id": "t2", "updates": {"status": "skipped"}},
+        },
+        {
+            "type": "task_updated",
+            "timestamp": "2026-02-10T15:20:00",
+            "payload": {"id": "t3", "updates": {"status": "completed"}},
+        },
+    ]
+
+    payload = retrospective._guardian_l2_protection(events, days=7)
+    assert payload["protected"] == 1
+    assert payload["interrupted"] == 1
+    assert payload["opportunities"] == 2
+    assert payload["ratio"] == 0.5
 
 
 def test_build_response_includes_suggestion_sources_for_active_signals(monkeypatch):
