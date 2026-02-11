@@ -226,6 +226,8 @@ def test_get_guardian_config_defaults_when_file_missing(monkeypatch, tmp_path):
     assert config["intervention_level"] == "SOFT"
     assert config["thresholds"]["deviation_signals"]["repeated_skip"] == 2
     assert config["thresholds"]["l2_protection"]["high"] == 0.75
+    assert config["authority"]["escalation"]["window_days"] == 7
+    assert config["authority"]["safe_mode"]["enabled"] is True
 
 
 def test_update_guardian_config_persists_and_emits_event(monkeypatch, tmp_path):
@@ -244,6 +246,21 @@ def test_update_guardian_config_persists_and_emits_event(monkeypatch, tmp_path):
             stagnation_days=5,
         ),
         l2_protection=api_router.GuardianL2ThresholdsRequest(high=0.8, medium=0.6),
+        authority=api_router.GuardianAuthorityConfigRequest(
+            escalation=api_router.GuardianEscalationConfigRequest(
+                window_days=9,
+                firm_reminder_resistance=3,
+                periodic_check_resistance=5,
+            ),
+            safe_mode=api_router.GuardianSafeModeConfigRequest(
+                enabled=True,
+                resistance_threshold=6,
+                min_response_events=4,
+                max_confirmation_ratio=0.3,
+                recovery_confirmations=2,
+                cooldown_hours=36,
+            ),
+        ),
     )
 
     payload = asyncio.run(api_router.update_guardian_config(req))
@@ -252,11 +269,13 @@ def test_update_guardian_config_persists_and_emits_event(monkeypatch, tmp_path):
     assert payload["config"]["intervention_level"] == "ASK"
     assert payload["config"]["thresholds"]["deviation_signals"]["repeated_skip"] == 4
     assert payload["config"]["thresholds"]["l2_protection"]["high"] == 0.8
+    assert payload["config"]["authority"]["escalation"]["window_days"] == 9
     assert emitted and emitted[0]["type"] == "guardian_config_updated"
 
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert saved["intervention_level"] == "ASK"
     assert saved["guardian_thresholds"]["deviation_signals"]["stagnation_days"] == 5
+    assert saved["guardian_authority"]["safe_mode"]["cooldown_hours"] == 36
 
 
 def test_update_guardian_config_rejects_invalid_l2_thresholds():
@@ -276,6 +295,51 @@ def test_update_guardian_config_rejects_invalid_l2_thresholds():
         assert getattr(exc, "status_code", None) == 400
     else:
         assert False, "Expected 400 when l2_protection.medium > l2_protection.high"
+
+
+def test_update_guardian_config_preserves_authority_when_not_provided(monkeypatch, tmp_path):
+    config_path = tmp_path / "blueprint.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "intervention_level": "SOFT",
+                "guardian_authority": {
+                    "escalation": {
+                        "window_days": 11,
+                        "firm_reminder_resistance": 2,
+                        "periodic_check_resistance": 6,
+                    },
+                    "safe_mode": {
+                        "enabled": True,
+                        "resistance_threshold": 7,
+                        "min_response_events": 4,
+                        "max_confirmation_ratio": 0.25,
+                        "recovery_confirmations": 2,
+                        "cooldown_hours": 48,
+                    },
+                },
+            },
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api_router, "BLUEPRINT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(api_router, "append_event", lambda event: None)
+
+    req = api_router.GuardianConfigUpdateRequest(
+        intervention_level="SOFT",
+        deviation_signals=api_router.GuardianDeviationThresholdsRequest(
+            repeated_skip=3,
+            l2_interruption=1,
+            stagnation_days=4,
+        ),
+        l2_protection=api_router.GuardianL2ThresholdsRequest(high=0.8, medium=0.6),
+    )
+    payload = asyncio.run(api_router.update_guardian_config(req))
+
+    assert payload["config"]["authority"]["escalation"]["window_days"] == 11
+    assert payload["config"]["authority"]["safe_mode"]["resistance_threshold"] == 7
 
 
 def test_sys_cycle_normalizes_audit_shape(monkeypatch):
@@ -325,8 +389,15 @@ def test_confirm_retrospective_intervention_appends_confirmation_event(monkeypat
         {
             "period": {"days": 7},
             "suggestion": "keep focus",
+            "display": True,
             "require_confirm": True,
             "suggestion_sources": [{"signal": "repeated_skip"}],
+            "response_action": {
+                "required": True,
+                "pending": True,
+                "fingerprint": "gcf_test_1",
+                "latest": None,
+            },
             "confirmation_action": {
                 "required": True,
                 "confirmed": False,
@@ -336,8 +407,19 @@ def test_confirm_retrospective_intervention_appends_confirmation_event(monkeypat
         {
             "period": {"days": 7},
             "suggestion": "keep focus",
+            "display": True,
             "require_confirm": False,
             "suggestion_sources": [{"signal": "repeated_skip"}],
+            "response_action": {
+                "required": True,
+                "pending": False,
+                "fingerprint": "gcf_test_1",
+                "latest": {
+                    "action": "confirm",
+                    "fingerprint": "gcf_test_1",
+                    "timestamp": "2026-02-11T12:00:00",
+                },
+            },
             "confirmation_action": {
                 "required": True,
                 "confirmed": True,
@@ -369,8 +451,15 @@ def test_confirm_retrospective_intervention_rejects_stale_fingerprint(monkeypatc
         lambda days=7: {
             "period": {"days": 7},
             "suggestion": "keep focus",
+            "display": True,
             "require_confirm": True,
             "suggestion_sources": [],
+            "response_action": {
+                "required": True,
+                "pending": True,
+                "fingerprint": "gcf_latest",
+                "latest": None,
+            },
             "confirmation_action": {
                 "required": True,
                 "confirmed": False,
@@ -386,6 +475,245 @@ def test_confirm_retrospective_intervention_rejects_stale_fingerprint(monkeypatc
         assert getattr(exc, "status_code", None) == 409
     else:  # pragma: no cover - defensive
         assert False, "Expected 409 for stale fingerprint"
+
+
+def test_respond_retrospective_intervention_appends_response_event(monkeypatch):
+    emitted = []
+    snapshots = [
+        {
+            "period": {"days": 7},
+            "suggestion": "keep focus",
+            "display": True,
+            "require_confirm": False,
+            "suggestion_sources": [{"signal": "repeated_skip"}],
+            "response_action": {
+                "required": False,
+                "pending": False,
+                "fingerprint": "gcf_resp_1",
+                "latest": None,
+            },
+            "confirmation_action": {
+                "required": False,
+                "confirmed": False,
+                "fingerprint": "gcf_resp_1",
+            },
+            "authority": {"safe_mode": {"active": False, "recommendation": {}}},
+        },
+        {
+            "period": {"days": 7},
+            "suggestion": "keep focus",
+            "display": True,
+            "require_confirm": False,
+            "suggestion_sources": [{"signal": "repeated_skip"}],
+            "response_action": {
+                "required": False,
+                "pending": False,
+                "fingerprint": "gcf_resp_1",
+                "latest": {
+                    "action": "dismiss",
+                    "fingerprint": "gcf_resp_1",
+                    "timestamp": "2026-02-11T12:10:00",
+                },
+            },
+            "confirmation_action": {
+                "required": False,
+                "confirmed": False,
+                "fingerprint": "gcf_resp_1",
+            },
+            "authority": {"safe_mode": {"active": False, "recommendation": {}}},
+        },
+    ]
+
+    monkeypatch.setattr(
+        api_router,
+        "build_guardian_retrospective_response",
+        lambda days=7: snapshots.pop(0),
+    )
+    monkeypatch.setattr(api_router, "append_event", lambda event: emitted.append(event))
+
+    req = api_router.RetrospectiveRespondRequest(
+        days=7,
+        fingerprint="gcf_resp_1",
+        action="dismiss",
+    )
+    payload = asyncio.run(api_router.respond_retrospective_intervention(req))
+
+    assert payload["status"] == "responded"
+    assert payload["action"] == "dismiss"
+    assert emitted and emitted[0]["type"] == "guardian_intervention_responded"
+    assert emitted[0]["payload"]["fingerprint"] == "gcf_resp_1"
+
+
+def test_respond_retrospective_intervention_can_enter_safe_mode(monkeypatch):
+    emitted = []
+    snapshots = [
+        {
+            "period": {"days": 7},
+            "suggestion": "keep focus",
+            "display": True,
+            "require_confirm": False,
+            "suggestion_sources": [{"signal": "repeated_skip"}],
+            "response_action": {
+                "required": False,
+                "pending": False,
+                "fingerprint": "gcf_safe_1",
+                "latest": None,
+            },
+            "confirmation_action": {
+                "required": False,
+                "confirmed": False,
+                "fingerprint": "gcf_safe_1",
+            },
+            "authority": {"safe_mode": {"active": False, "recommendation": {}}},
+        },
+        {
+            "period": {"days": 7},
+            "suggestion": "keep focus",
+            "display": True,
+            "require_confirm": False,
+            "suggestion_sources": [{"signal": "repeated_skip"}],
+            "response_action": {
+                "required": False,
+                "pending": False,
+                "fingerprint": "gcf_safe_1",
+                "latest": {
+                    "action": "dismiss",
+                    "fingerprint": "gcf_safe_1",
+                    "timestamp": "2026-02-11T12:10:00",
+                },
+            },
+            "confirmation_action": {
+                "required": False,
+                "confirmed": False,
+                "fingerprint": "gcf_safe_1",
+            },
+            "authority": {
+                "safe_mode": {
+                    "active": False,
+                    "cooldown_complete": True,
+                    "recommendation": {
+                        "should_enter": True,
+                        "should_exit": False,
+                        "reason": "high_resistance_low_follow_through",
+                        "response_count": 4,
+                        "resistance_count": 4,
+                        "confirmation_ratio": 0.0,
+                    },
+                }
+            },
+        },
+        {
+            "period": {"days": 7},
+            "suggestion": "keep focus",
+            "display": True,
+            "require_confirm": False,
+            "suggestion_sources": [{"signal": "repeated_skip"}],
+            "response_action": {
+                "required": False,
+                "pending": False,
+                "fingerprint": "gcf_safe_1",
+                "latest": {
+                    "action": "dismiss",
+                    "fingerprint": "gcf_safe_1",
+                    "timestamp": "2026-02-11T12:10:00",
+                },
+            },
+            "confirmation_action": {
+                "required": False,
+                "confirmed": False,
+                "fingerprint": "gcf_safe_1",
+            },
+            "authority": {
+                "safe_mode": {
+                    "active": True,
+                    "entered_at": "2026-02-11T12:11:00",
+                    "recommendation": {"should_enter": False, "should_exit": False},
+                }
+            },
+        },
+    ]
+
+    monkeypatch.setattr(
+        api_router,
+        "build_guardian_retrospective_response",
+        lambda days=7: snapshots.pop(0),
+    )
+    monkeypatch.setattr(api_router, "append_event", lambda event: emitted.append(event))
+
+    req = api_router.RetrospectiveRespondRequest(
+        days=7,
+        fingerprint="gcf_safe_1",
+        action="dismiss",
+    )
+    payload = asyncio.run(api_router.respond_retrospective_intervention(req))
+
+    assert payload["status"] == "responded"
+    assert payload["safe_mode_transition"] == "entered"
+    assert any(event["type"] == "guardian_safe_mode_entered" for event in emitted)
+
+
+def test_respond_retrospective_confirm_works_in_soft_mode(monkeypatch):
+    emitted = []
+    snapshots = [
+        {
+            "period": {"days": 7},
+            "suggestion": "keep focus",
+            "display": True,
+            "require_confirm": False,
+            "suggestion_sources": [{"signal": "repeated_skip"}],
+            "response_action": {
+                "required": False,
+                "pending": False,
+                "fingerprint": "gcf_soft_confirm",
+                "latest": None,
+            },
+            "confirmation_action": {
+                "required": False,
+                "confirmed": False,
+                "fingerprint": "gcf_soft_confirm",
+            },
+            "authority": {"safe_mode": {"active": False, "recommendation": {}}},
+        },
+        {
+            "period": {"days": 7},
+            "suggestion": "keep focus",
+            "display": True,
+            "require_confirm": False,
+            "suggestion_sources": [{"signal": "repeated_skip"}],
+            "response_action": {
+                "required": False,
+                "pending": False,
+                "fingerprint": "gcf_soft_confirm",
+                "latest": {
+                    "action": "confirm",
+                    "fingerprint": "gcf_soft_confirm",
+                    "timestamp": "2026-02-11T12:10:00",
+                },
+            },
+            "confirmation_action": {
+                "required": False,
+                "confirmed": True,
+                "fingerprint": "gcf_soft_confirm",
+            },
+            "authority": {"safe_mode": {"active": False, "recommendation": {}}},
+        },
+    ]
+    monkeypatch.setattr(
+        api_router,
+        "build_guardian_retrospective_response",
+        lambda days=7: snapshots.pop(0),
+    )
+    monkeypatch.setattr(api_router, "append_event", lambda event: emitted.append(event))
+
+    req = api_router.RetrospectiveRespondRequest(
+        days=7,
+        fingerprint="gcf_soft_confirm",
+        action="confirm",
+    )
+    payload = asyncio.run(api_router.respond_retrospective_intervention(req))
+
+    assert payload["status"] == "confirmed"
+    assert emitted and emitted[0]["type"] == "guardian_intervention_confirmed"
 
 
 def test_steward_anchor_filter_records_reasons(tmp_path):

@@ -20,6 +20,8 @@ from core.config_manager import config
 from core.event_sourcing import EVENT_LOG_PATH, rebuild_state
 from core.llm_adapter import get_llm
 
+GUARDIAN_RESPONSE_ACTIONS = {"confirm", "snooze", "dismiss"}
+
 
 def load_events_for_period(days: int = 7) -> List[Dict[str, Any]]:
     """
@@ -284,6 +286,20 @@ def _coerce_float(
     return parsed
 
 
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    if value is None:
+        return default
+    return bool(value)
+
+
 def _guardian_thresholds(days: int) -> Dict[str, Any]:
     defaults = {
         "repeated_skip": 2,
@@ -291,6 +307,15 @@ def _guardian_thresholds(days: int) -> Dict[str, Any]:
         "stagnation_days": 3 if days >= 3 else 1,
         "l2_protection_high": 0.75,
         "l2_protection_medium": 0.50,
+        "escalation_window_days": 7,
+        "escalation_firm_resistance": 2,
+        "escalation_periodic_resistance": 4,
+        "safe_mode_enabled": True,
+        "safe_mode_resistance_threshold": 5,
+        "safe_mode_min_response_events": 3,
+        "safe_mode_max_confirmation_ratio": 0.34,
+        "safe_mode_recovery_confirmations": 2,
+        "safe_mode_cooldown_hours": 24,
     }
 
     blueprint_config = _load_blueprint_config()
@@ -305,6 +330,18 @@ def _guardian_thresholds(days: int) -> Dict[str, Any]:
     l2_raw = raw_thresholds.get("l2_protection", {})
     if not isinstance(l2_raw, dict):
         l2_raw = {}
+
+    authority_raw = blueprint_config.get("guardian_authority", {})
+    if not isinstance(authority_raw, dict):
+        authority_raw = {}
+
+    escalation_raw = authority_raw.get("escalation", {})
+    if not isinstance(escalation_raw, dict):
+        escalation_raw = {}
+
+    safe_mode_raw = authority_raw.get("safe_mode", {})
+    if not isinstance(safe_mode_raw, dict):
+        safe_mode_raw = {}
 
     repeated_skip = _coerce_int(
         deviation_raw.get("repeated_skip", raw_thresholds.get("repeated_skip")),
@@ -336,12 +373,77 @@ def _guardian_thresholds(days: int) -> Dict[str, Any]:
     if medium > high:
         medium = high
 
+    escalation_window_days = _coerce_int(
+        escalation_raw.get("window_days"),
+        default=defaults["escalation_window_days"],
+        min_value=1,
+        max_value=30,
+    )
+    escalation_firm_resistance = _coerce_int(
+        escalation_raw.get("firm_reminder_resistance"),
+        default=defaults["escalation_firm_resistance"],
+        min_value=1,
+        max_value=99,
+    )
+    escalation_periodic_resistance = _coerce_int(
+        escalation_raw.get("periodic_check_resistance"),
+        default=defaults["escalation_periodic_resistance"],
+        min_value=1,
+        max_value=99,
+    )
+    if escalation_periodic_resistance < escalation_firm_resistance:
+        escalation_periodic_resistance = escalation_firm_resistance
+
+    safe_mode_enabled = _coerce_bool(
+        safe_mode_raw.get("enabled"),
+        defaults["safe_mode_enabled"],
+    )
+    safe_mode_resistance_threshold = _coerce_int(
+        safe_mode_raw.get("resistance_threshold"),
+        default=defaults["safe_mode_resistance_threshold"],
+        min_value=1,
+        max_value=999,
+    )
+    safe_mode_min_response_events = _coerce_int(
+        safe_mode_raw.get("min_response_events"),
+        default=defaults["safe_mode_min_response_events"],
+        min_value=1,
+        max_value=999,
+    )
+    safe_mode_max_confirmation_ratio = _coerce_float(
+        safe_mode_raw.get("max_confirmation_ratio"),
+        default=defaults["safe_mode_max_confirmation_ratio"],
+        min_value=0.0,
+        max_value=1.0,
+    )
+    safe_mode_recovery_confirmations = _coerce_int(
+        safe_mode_raw.get("recovery_confirmations"),
+        default=defaults["safe_mode_recovery_confirmations"],
+        min_value=1,
+        max_value=999,
+    )
+    safe_mode_cooldown_hours = _coerce_int(
+        safe_mode_raw.get("cooldown_hours"),
+        default=defaults["safe_mode_cooldown_hours"],
+        min_value=1,
+        max_value=720,
+    )
+
     return {
         "repeated_skip": repeated_skip,
         "l2_interruption": l2_interruption,
         "stagnation_days": stagnation_days,
         "l2_protection_high": high,
         "l2_protection_medium": medium,
+        "escalation_window_days": escalation_window_days,
+        "escalation_firm_resistance": escalation_firm_resistance,
+        "escalation_periodic_resistance": escalation_periodic_resistance,
+        "safe_mode_enabled": safe_mode_enabled,
+        "safe_mode_resistance_threshold": safe_mode_resistance_threshold,
+        "safe_mode_min_response_events": safe_mode_min_response_events,
+        "safe_mode_max_confirmation_ratio": safe_mode_max_confirmation_ratio,
+        "safe_mode_recovery_confirmations": safe_mode_recovery_confirmations,
+        "safe_mode_cooldown_hours": safe_mode_cooldown_hours,
     }
 
 
@@ -1020,6 +1122,263 @@ def _build_confirmation_fingerprint(raw: Dict[str, Any]) -> str:
     return f"gcf_{hashlib.sha256(encoded).hexdigest()[:16]}"
 
 
+def _guardian_response_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    event_type = event.get("type")
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    if event_type == "guardian_intervention_confirmed":
+        return {
+            "action": "confirm",
+            "event": event,
+            "payload": payload,
+            "timestamp": event.get("timestamp"),
+            "parsed_time": _parse_event_time(event),
+        }
+    if event_type != "guardian_intervention_responded":
+        return None
+    action = str(payload.get("action", "")).lower()
+    if action not in GUARDIAN_RESPONSE_ACTIONS:
+        return None
+    return {
+        "action": action,
+        "event": event,
+        "payload": payload,
+        "timestamp": event.get("timestamp"),
+        "parsed_time": _parse_event_time(event),
+    }
+
+
+def _iter_guardian_response_events(
+    events: List[Dict[str, Any]],
+    days: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for event in events:
+        normalized = _guardian_response_from_event(event)
+        if not normalized:
+            continue
+        payload = normalized["payload"] if isinstance(normalized["payload"], dict) else {}
+        payload_days = payload.get("days")
+        if days is not None and payload_days is not None:
+            try:
+                if int(payload_days) != int(days):
+                    continue
+            except (TypeError, ValueError):
+                continue
+        normalized["fingerprint"] = payload.get("fingerprint")
+        normalized["note"] = payload.get("note", "")
+        out.append(normalized)
+    return out
+
+
+def _find_guardian_response_event(
+    events: List[Dict[str, Any]],
+    days: int,
+    fingerprint: Optional[str],
+    action: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    for normalized in reversed(_iter_guardian_response_events(events, days=days)):
+        if action and normalized.get("action") != action:
+            continue
+        if fingerprint and normalized.get("fingerprint") != fingerprint:
+            continue
+        return normalized
+    return None
+
+
+def _safe_mode_state_from_runtime() -> Dict[str, Any]:
+    try:
+        state = rebuild_state()
+    except Exception:
+        state = {}
+    guardian = state.get("guardian") if isinstance(state, dict) else {}
+    guardian = guardian if isinstance(guardian, dict) else {}
+    safe_mode = guardian.get("safe_mode")
+    if not isinstance(safe_mode, dict):
+        safe_mode = {}
+    return {
+        "active": bool(safe_mode.get("active", False)),
+        "entered_at": safe_mode.get("entered_at"),
+        "exited_at": safe_mode.get("exited_at"),
+        "reason": safe_mode.get("reason"),
+    }
+
+
+def _guardian_authority_snapshot(
+    events: List[Dict[str, Any]],
+    thresholds: Dict[str, Any],
+    now: datetime,
+) -> Dict[str, Any]:
+    window_days = _coerce_int(
+        thresholds.get("escalation_window_days"),
+        default=7,
+        min_value=1,
+        max_value=30,
+    )
+    firm_threshold = _coerce_int(
+        thresholds.get("escalation_firm_resistance"),
+        default=2,
+        min_value=1,
+        max_value=99,
+    )
+    periodic_threshold = _coerce_int(
+        thresholds.get("escalation_periodic_resistance"),
+        default=4,
+        min_value=1,
+        max_value=99,
+    )
+    if periodic_threshold < firm_threshold:
+        periodic_threshold = firm_threshold
+
+    responses = _iter_guardian_response_events(events)
+    window_start = now - timedelta(days=window_days)
+    window_responses = [
+        entry
+        for entry in responses
+        if entry.get("parsed_time") and entry["parsed_time"] >= window_start
+    ]
+    response_count = len(window_responses)
+    resistance_count = sum(
+        1 for entry in window_responses if entry.get("action") in {"dismiss", "snooze"}
+    )
+    confirmation_count = sum(1 for entry in window_responses if entry.get("action") == "confirm")
+    confirmation_ratio = (
+        round(confirmation_count / response_count, 2) if response_count > 0 else None
+    )
+
+    if resistance_count >= periodic_threshold:
+        stage = "periodic_check"
+    elif resistance_count >= firm_threshold:
+        stage = "firm_reminder"
+    else:
+        stage = "gentle_nudge"
+
+    safe_mode_enabled = _coerce_bool(thresholds.get("safe_mode_enabled"), True)
+    safe_mode_resistance_threshold = _coerce_int(
+        thresholds.get("safe_mode_resistance_threshold"),
+        default=5,
+        min_value=1,
+        max_value=999,
+    )
+    safe_mode_min_events = _coerce_int(
+        thresholds.get("safe_mode_min_response_events"),
+        default=3,
+        min_value=1,
+        max_value=999,
+    )
+    safe_mode_max_ratio = _coerce_float(
+        thresholds.get("safe_mode_max_confirmation_ratio"),
+        default=0.34,
+        min_value=0.0,
+        max_value=1.0,
+    )
+    safe_mode_recovery_confirmations = _coerce_int(
+        thresholds.get("safe_mode_recovery_confirmations"),
+        default=2,
+        min_value=1,
+        max_value=999,
+    )
+    safe_mode_cooldown_hours = _coerce_int(
+        thresholds.get("safe_mode_cooldown_hours"),
+        default=24,
+        min_value=1,
+        max_value=720,
+    )
+
+    safe_mode_state = _safe_mode_state_from_runtime()
+    safe_mode_active = bool(safe_mode_state.get("active"))
+    entered_at_raw = safe_mode_state.get("entered_at")
+    entered_at = None
+    if isinstance(entered_at_raw, str):
+        try:
+            entered_at = datetime.fromisoformat(entered_at_raw.replace("Z", "+00:00")).replace(
+                tzinfo=None
+            )
+        except ValueError:
+            entered_at = None
+
+    confirmations_since_enter = 0
+    for entry in responses:
+        if entry.get("action") != "confirm":
+            continue
+        parsed_time = entry.get("parsed_time")
+        if not parsed_time:
+            continue
+        if entered_at and parsed_time < entered_at:
+            continue
+        confirmations_since_enter += 1
+
+    if entered_at:
+        cooldown_ends_at = entered_at + timedelta(hours=safe_mode_cooldown_hours)
+        cooldown_complete = now >= cooldown_ends_at
+        cooldown_ends_at_str = cooldown_ends_at.isoformat()
+    else:
+        cooldown_complete = True
+        cooldown_ends_at_str = None
+
+    should_enter_safe_mode = (
+        safe_mode_enabled
+        and not safe_mode_active
+        and response_count >= safe_mode_min_events
+        and resistance_count >= safe_mode_resistance_threshold
+        and confirmation_ratio is not None
+        and confirmation_ratio <= safe_mode_max_ratio
+    )
+    should_exit_safe_mode = (
+        safe_mode_active
+        and (
+            (not safe_mode_enabled)
+            or (
+                cooldown_complete
+                and confirmations_since_enter >= safe_mode_recovery_confirmations
+            )
+        )
+    )
+
+    recommendation_reason = ""
+    if should_enter_safe_mode:
+        recommendation_reason = "high_resistance_low_follow_through"
+    elif should_exit_safe_mode and not safe_mode_enabled:
+        recommendation_reason = "disabled_in_config"
+    elif should_exit_safe_mode:
+        recommendation_reason = "recovery_confirmation_threshold_met"
+
+    return {
+        "escalation": {
+            "stage": stage,
+            "window_days": window_days,
+            "response_count": response_count,
+            "resistance_count": resistance_count,
+            "confirmation_count": confirmation_count,
+            "confirmation_ratio": confirmation_ratio,
+            "firm_reminder_resistance": firm_threshold,
+            "periodic_check_resistance": periodic_threshold,
+        },
+        "safe_mode": {
+            "enabled": safe_mode_enabled,
+            "active": safe_mode_active,
+            "entered_at": safe_mode_state.get("entered_at"),
+            "exited_at": safe_mode_state.get("exited_at"),
+            "reason": safe_mode_state.get("reason"),
+            "cooldown_hours": safe_mode_cooldown_hours,
+            "cooldown_complete": cooldown_complete,
+            "cooldown_ends_at": cooldown_ends_at_str,
+            "recommendation": {
+                "should_enter": should_enter_safe_mode,
+                "should_exit": should_exit_safe_mode,
+                "reason": recommendation_reason,
+                "response_count": response_count,
+                "resistance_count": resistance_count,
+                "confirmation_ratio": confirmation_ratio,
+                "confirmations_since_enter": confirmations_since_enter,
+                "resistance_threshold": safe_mode_resistance_threshold,
+                "min_response_events": safe_mode_min_events,
+                "max_confirmation_ratio": safe_mode_max_ratio,
+                "recovery_confirmations": safe_mode_recovery_confirmations,
+            },
+        },
+    }
+
+
 def _find_confirmation_event(
     events: List[Dict[str, Any]],
     days: int,
@@ -1028,20 +1387,13 @@ def _find_confirmation_event(
     """
     Find the latest matching ASK confirmation event in current lookback window.
     """
-    for event in reversed(events):
-        if event.get("type") != "guardian_intervention_confirmed":
-            continue
-        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-        payload_days = payload.get("days")
-        if payload_days is not None:
-            try:
-                if int(payload_days) != int(days):
-                    continue
-            except (TypeError, ValueError):
-                continue
-        if payload.get("fingerprint") == fingerprint:
-            return event
-    return None
+    normalized = _find_guardian_response_event(
+        events=events,
+        days=days,
+        fingerprint=fingerprint,
+        action="confirm",
+    )
+    return normalized["event"] if normalized else None
 
 
 def build_guardian_retrospective_response(days: int = 7) -> Dict[str, Any]:
@@ -1050,6 +1402,15 @@ def build_guardian_retrospective_response(days: int = 7) -> Dict[str, Any]:
     包含 intervention_level, suggestion, display, require_confirm。
     """
     raw = generate_guardian_retrospective(days)
+    thresholds = _guardian_thresholds(days)
+    generated_at = raw.get("generated_at")
+    try:
+        now = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00")).replace(
+            tzinfo=None
+        )
+    except Exception:
+        now = datetime.now()
+
     level = get_intervention_level()
     suggestion = (
         (raw["observations"][0] if raw["observations"] else "")
@@ -1071,19 +1432,59 @@ def build_guardian_retrospective_response(days: int = 7) -> Dict[str, Any]:
         if signal.get("active")
     ]
     fingerprint = _build_confirmation_fingerprint(raw)
-    events = load_events_for_period(days)
+    events_lookup_days = max(
+        days,
+        _coerce_int(
+            thresholds.get("escalation_window_days"),
+            default=days,
+            min_value=1,
+            max_value=30,
+        ),
+    )
+    events = load_events_for_period(events_lookup_days)
     confirmation_event = _find_confirmation_event(
         events=events, days=days, fingerprint=fingerprint
     )
+    latest_response = _find_guardian_response_event(
+        events=events,
+        days=days,
+        fingerprint=fingerprint,
+    )
+    authority = _guardian_authority_snapshot(
+        events=events,
+        thresholds=thresholds,
+        now=now,
+    )
+
     confirmed = confirmation_event is not None
     confirmation_required = level == "ASK" and display and bool(suggestion)
     require_confirm = confirmation_required and not confirmed
+    latest_response_payload = (
+        {
+            "action": latest_response.get("action"),
+            "timestamp": latest_response.get("timestamp"),
+            "note": latest_response.get("note", ""),
+            "fingerprint": latest_response.get("fingerprint"),
+        }
+        if latest_response
+        else None
+    )
+    allowed_actions = list(sorted(GUARDIAN_RESPONSE_ACTIONS)) if display and suggestion else []
 
     raw["intervention_level"] = level
     raw["suggestion"] = suggestion
     raw["display"] = display
     raw["require_confirm"] = require_confirm
     raw["suggestion_sources"] = suggestion_sources
+    raw["response_action"] = {
+        "required": confirmation_required,
+        "pending": confirmation_required and not confirmed,
+        "allowed_actions": allowed_actions,
+        "latest": latest_response_payload,
+        "endpoint": "/api/v1/retrospective/respond",
+        "method": "POST",
+        "fingerprint": fingerprint,
+    }
     raw["confirmation_action"] = {
         "required": confirmation_required,
         "confirmed": confirmed,
@@ -1092,4 +1493,5 @@ def build_guardian_retrospective_response(days: int = 7) -> Dict[str, Any]:
         "method": "POST",
         "fingerprint": fingerprint,
     }
+    raw["authority"] = authority
     return raw

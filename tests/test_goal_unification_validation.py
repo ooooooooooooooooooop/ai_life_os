@@ -322,6 +322,15 @@ def test_retrospective_and_state_expose_intervention_contract(client, monkeypatc
             "display": True,
             "require_confirm": True,
             "suggestion_sources": [],
+            "response_action": {
+                "required": True,
+                "pending": True,
+                "allowed_actions": ["confirm", "snooze", "dismiss"],
+                "latest": None,
+                "endpoint": "/api/v1/retrospective/respond",
+                "method": "POST",
+                "fingerprint": "gcf_contract",
+            },
             "confirmation_action": {
                 "required": True,
                 "confirmed": False,
@@ -329,6 +338,14 @@ def test_retrospective_and_state_expose_intervention_contract(client, monkeypatc
                 "endpoint": "/api/v1/retrospective/confirm",
                 "method": "POST",
                 "fingerprint": "gcf_contract",
+            },
+            "authority": {
+                "escalation": {"stage": "gentle_nudge"},
+                "safe_mode": {
+                    "enabled": True,
+                    "active": False,
+                    "recommendation": {"should_enter": False, "should_exit": False},
+                },
             },
         },
     )
@@ -339,6 +356,7 @@ def test_retrospective_and_state_expose_intervention_contract(client, monkeypatc
     assert payload["intervention_level"] == "ASK"
     assert payload["require_confirm"] is True
     assert payload["confirmation_action"]["endpoint"] == "/api/v1/retrospective/confirm"
+    assert payload["response_action"]["endpoint"] == "/api/v1/retrospective/respond"
 
     state = client.get("/api/v1/state")
     assert state.status_code == 200
@@ -346,6 +364,7 @@ def test_retrospective_and_state_expose_intervention_contract(client, monkeypatc
     assert "guardian" in state_payload
     assert state_payload["guardian"]["pending_confirmation"] is True
     assert state_payload["guardian"]["confirmation_action"]["fingerprint"] == "gcf_contract"
+    assert state_payload["guardian"]["response_action"]["fingerprint"] == "gcf_contract"
 
 
 def test_migration_backup_supports_manual_rollback(isolated_runtime):

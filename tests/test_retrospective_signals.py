@@ -343,3 +343,185 @@ def test_build_response_marks_confirmed_when_matching_event_exists(monkeypatch):
     assert payload["confirmation_action"]["required"] is True
     assert payload["confirmation_action"]["confirmed"] is True
     assert payload["confirmation_action"]["confirmed_at"] == "2026-02-11T12:00:00"
+
+
+def test_build_response_includes_response_action_latest(monkeypatch):
+    monkeypatch.setattr(
+        retrospective,
+        "generate_guardian_retrospective",
+        lambda days: {
+            "period": {"days": days, "start_date": "2026-02-01", "end_date": "2026-02-07"},
+            "generated_at": datetime.now().isoformat(),
+            "rhythm": {"broken": False, "summary": "ok"},
+            "alignment": {"deviated": False, "summary": "ok"},
+            "friction": {"repeated_skip": False, "delay_signals": False, "summary": "ok"},
+            "deviation_signals": [],
+            "observations": ["keep focus"],
+        },
+    )
+    monkeypatch.setattr(retrospective, "get_intervention_level", lambda: "SOFT")
+    monkeypatch.setattr(retrospective, "_build_confirmation_fingerprint", lambda raw: "gcf_resp")
+    monkeypatch.setattr(
+        retrospective,
+        "load_events_for_period",
+        lambda days: [
+            {
+                "type": "guardian_intervention_responded",
+                "timestamp": "2026-02-11T11:00:00",
+                "payload": {"days": 7, "fingerprint": "gcf_resp", "action": "dismiss"},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        retrospective,
+        "_safe_mode_state_from_runtime",
+        lambda: {"active": False, "entered_at": None, "exited_at": None, "reason": None},
+    )
+
+    payload = retrospective.build_guardian_retrospective_response(days=7)
+    assert payload["response_action"]["endpoint"] == "/api/v1/retrospective/respond"
+    assert payload["response_action"]["fingerprint"] == "gcf_resp"
+    assert payload["response_action"]["latest"]["action"] == "dismiss"
+    assert set(payload["response_action"]["allowed_actions"]) == {"confirm", "snooze", "dismiss"}
+
+
+def test_authority_escalation_stage_uses_resistance_counts(monkeypatch):
+    monkeypatch.setattr(
+        retrospective,
+        "generate_guardian_retrospective",
+        lambda days: {
+            "period": {"days": days, "start_date": "2026-02-01", "end_date": "2026-02-07"},
+            "generated_at": "2026-02-11T12:00:00",
+            "rhythm": {"broken": False, "summary": "ok"},
+            "alignment": {"deviated": False, "summary": "ok"},
+            "friction": {"repeated_skip": False, "delay_signals": False, "summary": "ok"},
+            "deviation_signals": [],
+            "observations": ["keep focus"],
+        },
+    )
+    monkeypatch.setattr(retrospective, "get_intervention_level", lambda: "SOFT")
+    monkeypatch.setattr(retrospective, "_build_confirmation_fingerprint", lambda raw: "gcf_stage")
+    monkeypatch.setattr(
+        retrospective,
+        "_guardian_thresholds",
+        lambda days: {
+            "repeated_skip": 2,
+            "l2_interruption": 1,
+            "stagnation_days": 3,
+            "l2_protection_high": 0.75,
+            "l2_protection_medium": 0.5,
+            "escalation_window_days": 7,
+            "escalation_firm_resistance": 2,
+            "escalation_periodic_resistance": 4,
+            "safe_mode_enabled": False,
+            "safe_mode_resistance_threshold": 5,
+            "safe_mode_min_response_events": 3,
+            "safe_mode_max_confirmation_ratio": 0.34,
+            "safe_mode_recovery_confirmations": 2,
+            "safe_mode_cooldown_hours": 24,
+        },
+    )
+    monkeypatch.setattr(
+        retrospective,
+        "load_events_for_period",
+        lambda days: [
+            {
+                "type": "guardian_intervention_responded",
+                "timestamp": "2026-02-11T09:00:00",
+                "payload": {"days": 7, "fingerprint": "gcf_stage", "action": "dismiss"},
+            },
+            {
+                "type": "guardian_intervention_responded",
+                "timestamp": "2026-02-11T09:10:00",
+                "payload": {"days": 7, "fingerprint": "gcf_stage", "action": "snooze"},
+            },
+            {
+                "type": "guardian_intervention_responded",
+                "timestamp": "2026-02-11T09:20:00",
+                "payload": {"days": 7, "fingerprint": "gcf_stage", "action": "dismiss"},
+            },
+            {
+                "type": "guardian_intervention_responded",
+                "timestamp": "2026-02-11T09:30:00",
+                "payload": {"days": 7, "fingerprint": "gcf_stage", "action": "dismiss"},
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        retrospective,
+        "_safe_mode_state_from_runtime",
+        lambda: {"active": False, "entered_at": None, "exited_at": None, "reason": None},
+    )
+
+    payload = retrospective.build_guardian_retrospective_response(days=7)
+    assert payload["authority"]["escalation"]["stage"] == "periodic_check"
+    assert payload["authority"]["escalation"]["resistance_count"] == 4
+
+
+def test_authority_safe_mode_recommendation_can_enter(monkeypatch):
+    monkeypatch.setattr(
+        retrospective,
+        "generate_guardian_retrospective",
+        lambda days: {
+            "period": {"days": days, "start_date": "2026-02-01", "end_date": "2026-02-07"},
+            "generated_at": "2026-02-11T12:00:00",
+            "rhythm": {"broken": False, "summary": "ok"},
+            "alignment": {"deviated": False, "summary": "ok"},
+            "friction": {"repeated_skip": False, "delay_signals": False, "summary": "ok"},
+            "deviation_signals": [],
+            "observations": ["keep focus"],
+        },
+    )
+    monkeypatch.setattr(retrospective, "get_intervention_level", lambda: "SOFT")
+    monkeypatch.setattr(retrospective, "_build_confirmation_fingerprint", lambda raw: "gcf_safe")
+    monkeypatch.setattr(
+        retrospective,
+        "_guardian_thresholds",
+        lambda days: {
+            "repeated_skip": 2,
+            "l2_interruption": 1,
+            "stagnation_days": 3,
+            "l2_protection_high": 0.75,
+            "l2_protection_medium": 0.5,
+            "escalation_window_days": 7,
+            "escalation_firm_resistance": 2,
+            "escalation_periodic_resistance": 4,
+            "safe_mode_enabled": True,
+            "safe_mode_resistance_threshold": 3,
+            "safe_mode_min_response_events": 3,
+            "safe_mode_max_confirmation_ratio": 0.34,
+            "safe_mode_recovery_confirmations": 2,
+            "safe_mode_cooldown_hours": 24,
+        },
+    )
+    monkeypatch.setattr(
+        retrospective,
+        "load_events_for_period",
+        lambda days: [
+            {
+                "type": "guardian_intervention_responded",
+                "timestamp": "2026-02-11T09:00:00",
+                "payload": {"days": 7, "fingerprint": "gcf_safe", "action": "dismiss"},
+            },
+            {
+                "type": "guardian_intervention_responded",
+                "timestamp": "2026-02-11T09:10:00",
+                "payload": {"days": 7, "fingerprint": "gcf_safe", "action": "dismiss"},
+            },
+            {
+                "type": "guardian_intervention_responded",
+                "timestamp": "2026-02-11T09:20:00",
+                "payload": {"days": 7, "fingerprint": "gcf_safe", "action": "snooze"},
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        retrospective,
+        "_safe_mode_state_from_runtime",
+        lambda: {"active": False, "entered_at": None, "exited_at": None, "reason": None},
+    )
+
+    payload = retrospective.build_guardian_retrospective_response(days=7)
+    recommendation = payload["authority"]["safe_mode"]["recommendation"]
+    assert recommendation["should_enter"] is True
+    assert recommendation["reason"] == "high_resistance_low_follow_through"

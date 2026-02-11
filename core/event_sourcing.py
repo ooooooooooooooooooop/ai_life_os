@@ -38,7 +38,16 @@ def get_initial_state() -> Dict[str, Any]:
         "rhythm": {},
         "ongoing": {"active_tasks": []},
         "time_state": {"current_date": "", "previous_date": ""},
-        "guardian": {"last_intervention_confirmation": None},
+        "guardian": {
+            "last_intervention_confirmation": None,
+            "last_intervention_response": None,
+            "safe_mode": {
+                "active": False,
+                "entered_at": None,
+                "exited_at": None,
+                "reason": None,
+            },
+        },
         "goals": [], # List[Goal]
         "tasks": [], # List[Task]
         "executions": [], # List[Execution]
@@ -182,6 +191,47 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
             "timestamp": timestamp,
             "payload": payload if isinstance(payload, dict) else {},
         }
+        state["guardian"]["last_intervention_response"] = {
+            "timestamp": timestamp,
+            "action": "confirm",
+            "payload": payload if isinstance(payload, dict) else {},
+        }
+
+    elif event_type == "guardian_intervention_responded":
+        state.setdefault("guardian", {})
+        response_payload = payload if isinstance(payload, dict) else {}
+        state["guardian"]["last_intervention_response"] = {
+            "timestamp": timestamp,
+            "action": response_payload.get("action"),
+            "payload": response_payload,
+        }
+
+    elif event_type == "guardian_safe_mode_entered":
+        state.setdefault("guardian", {})
+        response_payload = payload if isinstance(payload, dict) else {}
+        state.setdefault("guardian", {})
+        state["guardian"]["safe_mode"] = {
+            "active": True,
+            "entered_at": timestamp,
+            "exited_at": None,
+            "reason": response_payload.get("reason"),
+        }
+
+    elif event_type == "guardian_safe_mode_exited":
+        state.setdefault("guardian", {})
+        response_payload = payload if isinstance(payload, dict) else {}
+        safe_mode = state["guardian"].get("safe_mode")
+        if not isinstance(safe_mode, dict):
+            safe_mode = {
+                "active": False,
+                "entered_at": None,
+                "exited_at": None,
+                "reason": None,
+            }
+        safe_mode["active"] = False
+        safe_mode["exited_at"] = timestamp
+        safe_mode["reason"] = response_payload.get("reason")
+        state["guardian"]["safe_mode"] = safe_mode
 
     return state
 

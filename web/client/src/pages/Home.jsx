@@ -78,7 +78,7 @@ export default function Home() {
     const [skipDialogOpen, setSkipDialogOpen] = useState(false);
     const [skipReason, setSkipReason] = useState('');
     const [deleteTargetGoalId, setDeleteTargetGoalId] = useState(null);
-    const [guardianConfirmLoading, setGuardianConfirmLoading] = useState(false);
+    const [guardianResponseLoading, setGuardianResponseLoading] = useState(false);
     const [anchorDiff, setAnchorDiff] = useState(null);
     const [anchorDiffLoading, setAnchorDiffLoading] = useState(false);
     const [activateAnchorLoading, setActivateAnchorLoading] = useState(false);
@@ -93,6 +93,11 @@ export default function Home() {
         repeated_skip: '重复跳过',
         l2_interruption: '深度时段中断',
         stagnation: '推进停滞'
+    };
+    const escalationStageMap = {
+        gentle_nudge: '温和提醒',
+        firm_reminder: '坚定提醒',
+        periodic_check: '周期检查'
     };
 
     const severityStyleMap = {
@@ -254,22 +259,30 @@ export default function Home() {
         }
     };
 
-    const handleConfirmIntervention = async () => {
-        if (!retrospective || guardianConfirmLoading) return;
+    const handleGuardianResponse = async (action) => {
+        if (!retrospective || guardianResponseLoading) return;
         try {
-            setGuardianConfirmLoading(true);
+            setGuardianResponseLoading(true);
             setError(null);
-            await api.post('/retrospective/confirm', {
+            await api.post('/retrospective/respond', {
                 days: retrospective.period?.days ?? 7,
-                fingerprint: retrospective.confirmation_action?.fingerprint ?? null
+                fingerprint:
+                    retrospective.response_action?.fingerprint
+                    ?? retrospective.confirmation_action?.fingerprint
+                    ?? null,
+                action
             });
             await fetchAll();
         } catch (e) {
             console.error(e);
-            setError('确认建议失败: ' + (e.response?.data?.detail || e.message));
+            setError('提交 Guardian 响应失败: ' + (e.response?.data?.detail || e.message));
         } finally {
-            setGuardianConfirmLoading(false);
+            setGuardianResponseLoading(false);
         }
+    };
+
+    const handleConfirmIntervention = async () => {
+        await handleGuardianResponse('confirm');
     };
 
     const handleCheckAnchorDiff = async () => {
@@ -367,6 +380,23 @@ export default function Home() {
                     medium: Number(guardianConfig.thresholds?.l2_protection?.medium ?? 0.5)
                 }
             };
+            if (guardianConfig.authority) {
+                payload.authority = {
+                    escalation: {
+                        window_days: Number(guardianConfig.authority?.escalation?.window_days ?? 7),
+                        firm_reminder_resistance: Number(guardianConfig.authority?.escalation?.firm_reminder_resistance ?? 2),
+                        periodic_check_resistance: Number(guardianConfig.authority?.escalation?.periodic_check_resistance ?? 4)
+                    },
+                    safe_mode: {
+                        enabled: Boolean(guardianConfig.authority?.safe_mode?.enabled ?? true),
+                        resistance_threshold: Number(guardianConfig.authority?.safe_mode?.resistance_threshold ?? 5),
+                        min_response_events: Number(guardianConfig.authority?.safe_mode?.min_response_events ?? 3),
+                        max_confirmation_ratio: Number(guardianConfig.authority?.safe_mode?.max_confirmation_ratio ?? 0.34),
+                        recovery_confirmations: Number(guardianConfig.authority?.safe_mode?.recovery_confirmations ?? 2),
+                        cooldown_hours: Number(guardianConfig.authority?.safe_mode?.cooldown_hours ?? 24)
+                    }
+                };
+            }
             const res = await api.put('/guardian/config', payload);
             setGuardianConfig(res.data?.config || guardianConfig);
             setGuardianConfigDirty(false);
@@ -415,6 +445,12 @@ export default function Home() {
     const l2ThresholdLabel = Number.isFinite(l2ThresholdHigh) && Number.isFinite(l2ThresholdMedium)
         ? `阈值: 高 ≥ ${Math.round(l2ThresholdHigh * 100)}% · 中 ≥ ${Math.round(l2ThresholdMedium * 100)}%`
         : null;
+    const guardianAuthority = retrospective?.authority || {};
+    const guardianEscalation = guardianAuthority?.escalation || {};
+    const guardianSafeMode = guardianAuthority?.safe_mode || {};
+    const guardianEscalationStage = guardianEscalation?.stage || 'gentle_nudge';
+    const guardianEscalationLabel = escalationStageMap[guardianEscalationStage] || guardianEscalationStage;
+    const guardianLatestResponse = retrospective?.response_action?.latest || null;
     const guardianThresholds = guardianConfig?.thresholds || {};
     const deviationCfg = guardianThresholds.deviation_signals || {};
     const l2Cfg = guardianThresholds.l2_protection || {};
@@ -770,6 +806,55 @@ export default function Home() {
                                 border: '1px solid rgba(255,255,255,0.12)',
                                 borderRadius: '8px',
                                 padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Authority 升级级别</div>
+                                <div style={{ fontSize: '0.86rem', fontWeight: 600 }}>{guardianEscalationLabel}</div>
+                            </div>
+                            <div style={{ marginTop: '0.25rem', fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
+                                窗口 {guardianEscalation.window_days ?? 7} 天 · 抵抗 {guardianEscalation.resistance_count ?? 0}
+                                / 响应 {guardianEscalation.response_count ?? 0}
+                            </div>
+                        </div>
+                        {guardianSafeMode.enabled && (
+                            <div
+                                style={{
+                                    marginBottom: '0.75rem',
+                                    border: guardianSafeMode.active
+                                        ? '1px solid rgba(245, 158, 11, 0.45)'
+                                        : '1px solid rgba(148, 163, 184, 0.3)',
+                                    borderRadius: '8px',
+                                    padding: '0.65rem 0.75rem',
+                                    background: guardianSafeMode.active
+                                        ? 'rgba(245, 158, 11, 0.14)'
+                                        : 'rgba(148, 163, 184, 0.08)'
+                                }}
+                            >
+                                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                    <div style={{ fontSize: '0.82rem', fontWeight: 600 }}>
+                                        Safe Mode {guardianSafeMode.active ? '已开启' : '未开启'}
+                                    </div>
+                                    {guardianSafeMode.entered_at && (
+                                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            {guardianSafeMode.active ? '进入于' : '最近结束于'} {guardianSafeMode.active ? guardianSafeMode.entered_at : (guardianSafeMode.exited_at || guardianSafeMode.entered_at)}
+                                        </div>
+                                    )}
+                                </div>
+                                {guardianSafeMode.reason && (
+                                    <div style={{ marginTop: '0.25rem', fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
+                                        原因: {guardianSafeMode.reason}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
                                 background: 'rgba(255,255,255,0.03)'
                             }}
                         >
@@ -959,26 +1044,46 @@ export default function Home() {
                                 <div style={{ fontSize: '0.75rem', color: 'var(--accent-color)', fontWeight: 600 }}>建议</div>
                                 <p style={{ margin: '0.25rem 0 0.5rem 0', fontSize: '0.9rem' }}>{retrospective.suggestion}</p>
 
-                                {retrospective.confirmation_action?.required && (
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                                        {retrospective.confirmation_action.confirmed ? (
-                                            <span style={{ fontSize: '0.8rem', color: '#86efac' }}>
-                                                已确认
-                                                {retrospective.confirmation_action.confirmed_at
-                                                    ? ` (${retrospective.confirmation_action.confirmed_at})`
-                                                    : ''}
-                                            </span>
-                                        ) : (
-                                            <button
-                                                type="button"
-                                                className="btn btn-primary"
-                                                onClick={handleConfirmIntervention}
-                                                disabled={guardianConfirmLoading}
-                                                style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
-                                            >
-                                                {guardianConfirmLoading ? '确认中...' : '确认已阅读建议'}
-                                            </button>
-                                        )}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                    <button
+                                        type="button"
+                                        className="btn btn-primary"
+                                        onClick={handleConfirmIntervention}
+                                        disabled={guardianResponseLoading || retrospective.confirmation_action?.confirmed}
+                                        style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
+                                    >
+                                        {retrospective.confirmation_action?.confirmed
+                                            ? '已确认'
+                                            : guardianResponseLoading ? '提交中...' : '确认建议'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={() => handleGuardianResponse('snooze')}
+                                        disabled={guardianResponseLoading}
+                                        style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
+                                    >
+                                        稍后处理
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={() => handleGuardianResponse('dismiss')}
+                                        disabled={guardianResponseLoading}
+                                        style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
+                                    >
+                                        暂不采纳
+                                    </button>
+                                </div>
+                                {retrospective.confirmation_action?.required && !retrospective.confirmation_action?.confirmed && (
+                                    <div style={{ marginTop: '0.35rem', fontSize: '0.75rem', color: '#fcd34d' }}>
+                                        当前为 ASK 模式，需要最终确认。
+                                    </div>
+                                )}
+                                {guardianLatestResponse && (
+                                    <div style={{ marginTop: '0.35rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        最近响应: {guardianLatestResponse.action || '--'}
+                                        {guardianLatestResponse.timestamp ? ` · ${guardianLatestResponse.timestamp}` : ''}
                                     </div>
                                 )}
                             </div>

@@ -16,6 +16,20 @@ guardian_thresholds:
     high: 0.75
     medium: 0.50
 
+# Guardian authority policy
+guardian_authority:
+  escalation:
+    window_days: 7
+    firm_reminder_resistance: 2
+    periodic_check_resistance: 4
+  safe_mode:
+    enabled: true
+    resistance_threshold: 5
+    min_response_events: 3
+    max_confirmation_ratio: 0.34
+    recovery_confirmations: 2
+    cooldown_hours: 24
+
 principles:
   - name: "life_value"
     weight: 0.35
