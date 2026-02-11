@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import yaml
+
 from core.config_manager import config
 from core.event_sourcing import EVENT_LOG_PATH, rebuild_state
 from core.llm_adapter import get_llm
@@ -236,6 +238,113 @@ def _event_evidence(event: Dict[str, Any], detail: str) -> Dict[str, Any]:
     }
 
 
+def _load_blueprint_config() -> Dict[str, Any]:
+    config_path = Path(__file__).parent.parent / "config" / "blueprint.yaml"
+    if not config_path.exists():
+        return {}
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _coerce_int(
+    value: Any,
+    default: int,
+    min_value: Optional[int] = None,
+    max_value: Optional[int] = None,
+) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    if min_value is not None:
+        parsed = max(min_value, parsed)
+    if max_value is not None:
+        parsed = min(max_value, parsed)
+    return parsed
+
+
+def _coerce_float(
+    value: Any,
+    default: float,
+    min_value: Optional[float] = None,
+    max_value: Optional[float] = None,
+) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    if min_value is not None:
+        parsed = max(min_value, parsed)
+    if max_value is not None:
+        parsed = min(max_value, parsed)
+    return parsed
+
+
+def _guardian_thresholds(days: int) -> Dict[str, Any]:
+    defaults = {
+        "repeated_skip": 2,
+        "l2_interruption": 1,
+        "stagnation_days": 3 if days >= 3 else 1,
+        "l2_protection_high": 0.75,
+        "l2_protection_medium": 0.50,
+    }
+
+    blueprint_config = _load_blueprint_config()
+    raw_thresholds = blueprint_config.get("guardian_thresholds", {})
+    if not isinstance(raw_thresholds, dict):
+        raw_thresholds = {}
+
+    deviation_raw = raw_thresholds.get("deviation_signals", {})
+    if not isinstance(deviation_raw, dict):
+        deviation_raw = {}
+
+    l2_raw = raw_thresholds.get("l2_protection", {})
+    if not isinstance(l2_raw, dict):
+        l2_raw = {}
+
+    repeated_skip = _coerce_int(
+        deviation_raw.get("repeated_skip", raw_thresholds.get("repeated_skip")),
+        default=defaults["repeated_skip"],
+        min_value=1,
+    )
+    l2_interruption = _coerce_int(
+        deviation_raw.get("l2_interruption", raw_thresholds.get("l2_interruption")),
+        default=defaults["l2_interruption"],
+        min_value=1,
+    )
+    stagnation_days = _coerce_int(
+        deviation_raw.get("stagnation_days", raw_thresholds.get("stagnation_days")),
+        default=defaults["stagnation_days"],
+        min_value=1,
+    )
+    high = _coerce_float(
+        l2_raw.get("high", raw_thresholds.get("l2_protection_high")),
+        default=defaults["l2_protection_high"],
+        min_value=0.0,
+        max_value=1.0,
+    )
+    medium = _coerce_float(
+        l2_raw.get("medium", raw_thresholds.get("l2_protection_medium")),
+        default=defaults["l2_protection_medium"],
+        min_value=0.0,
+        max_value=1.0,
+    )
+    if medium > high:
+        medium = high
+
+    return {
+        "repeated_skip": repeated_skip,
+        "l2_interruption": l2_interruption,
+        "stagnation_days": stagnation_days,
+        "l2_protection_high": high,
+        "l2_protection_medium": medium,
+    }
+
+
 def _extract_task_id_from_event(event: Dict[str, Any]) -> Optional[str]:
     event_type = event.get("type")
     if event_type in {"task_failed", "task_completed"}:
@@ -298,13 +407,33 @@ def _build_l2_reference_maps() -> Tuple[Dict[str, str], Dict[str, str]]:
     return goal_type_by_goal_id, task_goal_by_task_id
 
 
-def _guardian_l2_protection(events: List[Dict[str, Any]], days: int) -> Dict[str, Any]:
+def _guardian_l2_protection(
+    events: List[Dict[str, Any]],
+    days: int,
+    thresholds: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     L2 protection ratio:
     During deep_work window, how many L2 task outcomes are protected (completed)
     vs interrupted (skipped).
     """
     goal_type_by_goal_id, task_goal_by_task_id = _build_l2_reference_maps()
+    if thresholds is None:
+        thresholds = _guardian_thresholds(days)
+    high_threshold = _coerce_float(
+        thresholds.get("l2_protection_high"),
+        default=0.75,
+        min_value=0.0,
+        max_value=1.0,
+    )
+    medium_threshold = _coerce_float(
+        thresholds.get("l2_protection_medium"),
+        default=0.50,
+        min_value=0.0,
+        max_value=1.0,
+    )
+    if medium_threshold > high_threshold:
+        medium_threshold = high_threshold
 
     day_keys = [
         (datetime.now() - timedelta(days=offset)).strftime("%Y-%m-%d")
@@ -368,10 +497,10 @@ def _guardian_l2_protection(events: List[Dict[str, Any]], days: int) -> Dict[str
     if ratio is None:
         level = "unknown"
         summary = "暂无可计算的 L2 保护数据。"
-    elif ratio >= 0.75:
+    elif ratio >= high_threshold:
         level = "high"
         summary = "L2 保护表现良好，深度工作时段执行稳定。"
-    elif ratio >= 0.50:
+    elif ratio >= medium_threshold:
         level = "medium"
         summary = "L2 保护一般，仍有中断，建议减少深度时段切换。"
     else:
@@ -386,10 +515,15 @@ def _guardian_l2_protection(events: List[Dict[str, Any]], days: int) -> Dict[str
         "opportunities": opportunities,
         "summary": summary,
         "trend": points,
+        "thresholds": {"high": high_threshold, "medium": medium_threshold},
     }
 
 
-def _detect_deviation_signals(events: List[Dict[str, Any]], days: int) -> List[Dict[str, Any]]:
+def _detect_deviation_signals(
+    events: List[Dict[str, Any]],
+    days: int,
+    thresholds: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     """
     Detect behavior deviation signals and provide traceable evidence.
     """
@@ -408,18 +542,36 @@ def _detect_deviation_signals(events: List[Dict[str, Any]], days: int) -> List[D
         if _is_progress_event(event):
             progress_events.append(event)
 
+    if thresholds is None:
+        thresholds = _guardian_thresholds(days)
+
+    repeated_skip_threshold = _coerce_int(
+        thresholds.get("repeated_skip"),
+        default=2,
+        min_value=1,
+    )
+    l2_interruption_threshold = _coerce_int(
+        thresholds.get("l2_interruption"),
+        default=1,
+        min_value=1,
+    )
+    stagnation_threshold_days = _coerce_int(
+        thresholds.get("stagnation_days"),
+        default=(3 if days >= 3 else 1),
+        min_value=1,
+    )
+
     repeated_skip_count = len(skip_events)
-    repeated_skip_active = repeated_skip_count >= 2
+    repeated_skip_active = repeated_skip_count >= repeated_skip_threshold
 
     l2_interruption_count = len(l2_interruptions)
-    l2_interruption_active = l2_interruption_count >= 1
+    l2_interruption_active = l2_interruption_count >= l2_interruption_threshold
 
     now = datetime.now()
     recent_progress_time = max(
         (_parse_event_time(ev) for ev in progress_events if _parse_event_time(ev)),
         default=None,
     )
-    stagnation_threshold_days = 3 if days >= 3 else 1
     if recent_progress_time is None:
         days_without_progress = days
     else:
@@ -432,7 +584,7 @@ def _detect_deviation_signals(events: List[Dict[str, Any]], days: int) -> List[D
             "active": repeated_skip_active,
             "severity": "medium" if repeated_skip_active else "info",
             "count": repeated_skip_count,
-            "threshold": 2,
+            "threshold": repeated_skip_threshold,
             "summary": (
                 f"检测到 {repeated_skip_count} 次跳过行为，可能存在执行摩擦。"
                 if repeated_skip_active
@@ -448,7 +600,7 @@ def _detect_deviation_signals(events: List[Dict[str, Any]], days: int) -> List[D
             "active": l2_interruption_active,
             "severity": "high" if l2_interruption_active else "info",
             "count": l2_interruption_count,
-            "threshold": 1,
+            "threshold": l2_interruption_threshold,
             "summary": (
                 f"深度工作时段检测到 {l2_interruption_count} 次跳过，存在 L2 执行中断。"
                 if l2_interruption_active
@@ -804,13 +956,14 @@ def generate_guardian_retrospective(days: int = 7) -> Dict[str, Any]:
     now = datetime.now()
     start_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
     end_date = now.strftime("%Y-%m-%d")
+    thresholds = _guardian_thresholds(days)
 
     rhythm = _guardian_rhythm(events, days)
     alignment = _guardian_alignment(events)
     alignment["trend"] = _goal_alignment_trend(events, days)
     friction = _guardian_friction(events)
-    l2_protection = _guardian_l2_protection(events, days)
-    deviation_signals = _detect_deviation_signals(events, days)
+    l2_protection = _guardian_l2_protection(events, days, thresholds=thresholds)
+    deviation_signals = _detect_deviation_signals(events, days, thresholds=thresholds)
     observations = _guardian_observations(
         rhythm,
         alignment,
@@ -833,18 +986,10 @@ def generate_guardian_retrospective(days: int = 7) -> Dict[str, Any]:
 
 def get_intervention_level() -> str:
     """从 config/blueprint.yaml 读取 intervention_level：OBSERVE_ONLY | SOFT | ASK。默认 SOFT。"""
-    import yaml
-    config_path = Path(__file__).parent.parent / "config" / "blueprint.yaml"
-    if not config_path.exists():
-        return "SOFT"
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        level = data.get("intervention_level", "SOFT")
-        if level in ("OBSERVE_ONLY", "SOFT", "ASK"):
-            return level
-    except Exception:
-        pass
+    data = _load_blueprint_config()
+    level = data.get("intervention_level", "SOFT")
+    if level in ("OBSERVE_ONLY", "SOFT", "ASK"):
+        return level
     return "SOFT"
 
 

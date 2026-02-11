@@ -328,6 +328,12 @@ export default function Home() {
         low: '#fca5a5',
         unknown: '#cbd5e1'
     };
+    const l2TrendPoints = (retrospective?.l2_protection?.trend || []).slice(-7);
+    const l2ThresholdHigh = Number(retrospective?.l2_protection?.thresholds?.high);
+    const l2ThresholdMedium = Number(retrospective?.l2_protection?.thresholds?.medium);
+    const l2ThresholdLabel = Number.isFinite(l2ThresholdHigh) && Number.isFinite(l2ThresholdMedium)
+        ? `阈值: 高 ≥ ${Math.round(l2ThresholdHigh * 100)}% · 中 ≥ ${Math.round(l2ThresholdMedium * 100)}%`
+        : null;
 
     if (loading) {
         return (
@@ -695,6 +701,56 @@ export default function Home() {
                             <div style={{ marginTop: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
                                 完成 {retrospective.l2_protection?.protected ?? 0} · 中断 {retrospective.l2_protection?.interrupted ?? 0}
                             </div>
+                            {l2ThresholdLabel && (
+                                <div style={{ marginTop: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    {l2ThresholdLabel}
+                                </div>
+                            )}
+                            {l2TrendPoints.length > 0 && (
+                                <div style={{ marginTop: '0.5rem', display: 'grid', gap: '0.25rem' }}>
+                                    {l2TrendPoints.map((point) => {
+                                        const ratio = Number(point?.ratio);
+                                        const ratioPct = Number.isFinite(ratio) ? Math.round(ratio * 100) : null;
+                                        const barWidth = ratioPct !== null ? `${Math.max(0, Math.min(100, ratioPct))}%` : '0%';
+                                        return (
+                                            <div
+                                                key={point.date}
+                                                style={{
+                                                    display: 'grid',
+                                                    gridTemplateColumns: '52px 1fr 44px',
+                                                    gap: '0.35rem',
+                                                    alignItems: 'center'
+                                                }}
+                                            >
+                                                <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                                    {(point.date || '').slice(5)}
+                                                </span>
+                                                <div
+                                                    style={{
+                                                        height: '6px',
+                                                        borderRadius: '999px',
+                                                        background: 'rgba(255,255,255,0.12)',
+                                                        overflow: 'hidden'
+                                                    }}
+                                                >
+                                                    <div
+                                                        style={{
+                                                            width: barWidth,
+                                                            height: '100%',
+                                                            background: ratioPct === null
+                                                                ? 'rgba(148, 163, 184, 0.4)'
+                                                                : 'rgba(34, 197, 94, 0.8)'
+                                                        }}
+                                                    />
+                                                </div>
+                                                <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', textAlign: 'right' }}>
+                                                    {ratioPct === null ? '--' : `${ratioPct}%`}
+                                                </span>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
                         </div>
 
                         {retrospective.display && retrospective.suggestion && (

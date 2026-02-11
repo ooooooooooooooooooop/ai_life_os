@@ -7,6 +7,14 @@
 # - intervention_level: OBSERVE_ONLY（只记录不展示）| SOFT（展示建议，默认）| ASK（展示并需用户确认）
 # - 本版不实现 IMMEDIATE（强制），留待 Safe Mode 之后
 intervention_level: SOFT
+guardian_thresholds:
+  deviation_signals:
+    repeated_skip: 2
+    l2_interruption: 1
+    stagnation_days: 3
+  l2_protection:
+    high: 0.75
+    medium: 0.50
 
 principles:
   - name: "life_value"

@@ -270,6 +270,7 @@ async def get_state():
                 "l2_protection_level": l2_protection.get("level"),
                 "l2_protection_summary": l2_protection.get("summary"),
                 "l2_protection_trend": l2_protection.get("trend", []),
+                "l2_protection_thresholds": l2_protection.get("thresholds", {}),
             },
         },
         "audit": state_audit,

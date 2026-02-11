@@ -86,7 +86,7 @@ def test_generate_guardian_retrospective_includes_alignment_trend(monkeypatch):
     monkeypatch.setattr(
         retrospective,
         "_guardian_l2_protection",
-        lambda events, days: {
+        lambda events, days, thresholds=None: {
             "ratio": 0.8,
             "level": "high",
             "protected": 4,
@@ -96,7 +96,11 @@ def test_generate_guardian_retrospective_includes_alignment_trend(monkeypatch):
             "trend": [],
         },
     )
-    monkeypatch.setattr(retrospective, "_detect_deviation_signals", lambda events, days: [])
+    monkeypatch.setattr(
+        retrospective,
+        "_detect_deviation_signals",
+        lambda events, days, thresholds=None: [],
+    )
     monkeypatch.setattr(
         retrospective,
         "_guardian_observations",
@@ -142,6 +146,81 @@ def test_guardian_l2_protection_ratio_uses_deep_work_l2_events(monkeypatch):
     assert payload["interrupted"] == 1
     assert payload["opportunities"] == 2
     assert payload["ratio"] == 0.5
+
+
+def test_detect_deviation_signals_respects_configurable_thresholds(monkeypatch):
+    monkeypatch.setattr(
+        retrospective,
+        "_guardian_thresholds",
+        lambda days: {
+            "repeated_skip": 3,
+            "l2_interruption": 2,
+            "stagnation_days": 5,
+            "l2_protection_high": 0.75,
+            "l2_protection_medium": 0.50,
+        },
+    )
+    events = [
+        {
+            "event_id": "evt_11",
+            "type": "task_updated",
+            "timestamp": "2026-02-10T10:05:00",
+            "payload": {"updates": {"status": "skipped"}},
+        },
+        {
+            "event_id": "evt_12",
+            "type": "task_updated",
+            "timestamp": "2026-02-10T10:20:00",
+            "payload": {"updates": {"status": "skipped"}},
+        },
+    ]
+
+    signals = retrospective._detect_deviation_signals(events, days=7)
+    repeated_skip = _signal_by_name(signals, "repeated_skip")
+    l2_interruption = _signal_by_name(signals, "l2_interruption")
+
+    assert repeated_skip["threshold"] == 3
+    assert repeated_skip["active"] is False
+    assert l2_interruption["threshold"] == 2
+    assert l2_interruption["active"] is True
+
+
+def test_guardian_l2_protection_uses_ratio_threshold_config(monkeypatch):
+    monkeypatch.setattr(
+        retrospective,
+        "_build_l2_reference_maps",
+        lambda: ({"g_l2": "L2_FLOURISHING"}, {"t1": "g_l2", "t2": "g_l2", "t3": "g_l2"}),
+    )
+    thresholds = {
+        "repeated_skip": 2,
+        "l2_interruption": 1,
+        "stagnation_days": 3,
+        "l2_protection_high": 0.9,
+        "l2_protection_medium": 0.6,
+    }
+    events = [
+        {
+            "type": "task_updated",
+            "timestamp": "2026-02-10T10:00:00",
+            "payload": {"id": "t1", "updates": {"status": "completed"}},
+        },
+        {
+            "type": "task_updated",
+            "timestamp": "2026-02-10T10:20:00",
+            "payload": {"id": "t2", "updates": {"status": "completed"}},
+        },
+        {
+            "type": "task_updated",
+            "timestamp": "2026-02-10T10:30:00",
+            "payload": {"id": "t3", "updates": {"status": "skipped"}},
+        },
+    ]
+
+    payload = retrospective._guardian_l2_protection(events, days=7, thresholds=thresholds)
+    assert payload["ratio"] == 0.67
+    assert payload["level"] == "medium"
+    assert payload["thresholds"]["high"] == 0.9
+    assert payload["thresholds"]["medium"] == 0.6
 
 
 def test_build_response_includes_suggestion_sources_for_active_signals(monkeypatch):
