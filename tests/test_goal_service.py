@@ -1,6 +1,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
+import yaml
 
 import core.event_sourcing as event_sourcing
 import core.snapshot_manager as snapshot_manager
@@ -213,6 +214,68 @@ def test_state_endpoint_includes_stable_audit_shape(monkeypatch):
     assert "alignment" in payload
     assert "goal_summary" in payload["alignment"]
     assert payload["meta"]["event_schema_version"] == event_sourcing.EVENT_SCHEMA_VERSION
+
+
+def test_get_guardian_config_defaults_when_file_missing(monkeypatch, tmp_path):
+    missing_path = tmp_path / "blueprint.yaml"
+    monkeypatch.setattr(api_router, "BLUEPRINT_CONFIG_PATH", missing_path)
+
+    payload = asyncio.run(api_router.get_guardian_config())
+    config = payload["config"]
+
+    assert config["intervention_level"] == "SOFT"
+    assert config["thresholds"]["deviation_signals"]["repeated_skip"] == 2
+    assert config["thresholds"]["l2_protection"]["high"] == 0.75
+
+
+def test_update_guardian_config_persists_and_emits_event(monkeypatch, tmp_path):
+    config_path = tmp_path / "blueprint.yaml"
+    config_path.write_text("intervention_level: SOFT\n", encoding="utf-8")
+    emitted = []
+
+    monkeypatch.setattr(api_router, "BLUEPRINT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(api_router, "append_event", lambda event: emitted.append(event))
+
+    req = api_router.GuardianConfigUpdateRequest(
+        intervention_level="ASK",
+        deviation_signals=api_router.GuardianDeviationThresholdsRequest(
+            repeated_skip=4,
+            l2_interruption=2,
+            stagnation_days=5,
+        ),
+        l2_protection=api_router.GuardianL2ThresholdsRequest(high=0.8, medium=0.6),
+    )
+
+    payload = asyncio.run(api_router.update_guardian_config(req))
+
+    assert payload["status"] == "updated"
+    assert payload["config"]["intervention_level"] == "ASK"
+    assert payload["config"]["thresholds"]["deviation_signals"]["repeated_skip"] == 4
+    assert payload["config"]["thresholds"]["l2_protection"]["high"] == 0.8
+    assert emitted and emitted[0]["type"] == "guardian_config_updated"
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["intervention_level"] == "ASK"
+    assert saved["guardian_thresholds"]["deviation_signals"]["stagnation_days"] == 5
+
+
+def test_update_guardian_config_rejects_invalid_l2_thresholds():
+    req = api_router.GuardianConfigUpdateRequest(
+        intervention_level="SOFT",
+        deviation_signals=api_router.GuardianDeviationThresholdsRequest(
+            repeated_skip=2,
+            l2_interruption=1,
+            stagnation_days=3,
+        ),
+        l2_protection=api_router.GuardianL2ThresholdsRequest(high=0.5, medium=0.7),
+    )
+
+    try:
+        asyncio.run(api_router.update_guardian_config(req))
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+    else:
+        assert False, "Expected 400 when l2_protection.medium > l2_protection.high"
 
 
 def test_sys_cycle_normalizes_audit_shape(monkeypatch):

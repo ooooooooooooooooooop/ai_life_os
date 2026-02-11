@@ -2,11 +2,12 @@ import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+import yaml
 
 from core.blueprint_anchor import AnchorManager
 from core.event_sourcing import EVENT_LOG_PATH, EVENT_SCHEMA_VERSION, append_event
@@ -51,6 +52,23 @@ class AnchorActivateRequest(BaseModel):
     force: bool = False
 
 
+class GuardianDeviationThresholdsRequest(BaseModel):
+    repeated_skip: int = 2
+    l2_interruption: int = 1
+    stagnation_days: int = 3
+
+
+class GuardianL2ThresholdsRequest(BaseModel):
+    high: float = 0.75
+    medium: float = 0.50
+
+
+class GuardianConfigUpdateRequest(BaseModel):
+    intervention_level: Optional[str] = None
+    deviation_signals: GuardianDeviationThresholdsRequest
+    l2_protection: GuardianL2ThresholdsRequest
+
+
 def get_steward() -> Steward:
     state = ensure_tick_applied()
     registry = GoalRegistry()
@@ -67,6 +85,119 @@ BLUEPRINT_PATH = (
     / "concepts"
     / "better_human_blueprint.md"
 )
+BLUEPRINT_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "blueprint.yaml"
+ALLOWED_INTERVENTION_LEVELS = {"OBSERVE_ONLY", "SOFT", "ASK"}
+
+
+def _coerce_int(value: Any, default: int, min_value: int = 1, max_value: int = 365) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(min_value, min(max_value, parsed))
+
+
+def _coerce_float(
+    value: Any,
+    default: float,
+    min_value: float = 0.0,
+    max_value: float = 1.0,
+) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(min_value, min(max_value, parsed))
+
+
+def _guardian_config_defaults() -> Dict[str, Any]:
+    return {
+        "intervention_level": "SOFT",
+        "thresholds": {
+            "deviation_signals": {
+                "repeated_skip": 2,
+                "l2_interruption": 1,
+                "stagnation_days": 3,
+            },
+            "l2_protection": {"high": 0.75, "medium": 0.50},
+        },
+    }
+
+
+def _load_blueprint_yaml() -> Dict[str, Any]:
+    if not BLUEPRINT_CONFIG_PATH.exists():
+        return {}
+    try:
+        with open(BLUEPRINT_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _normalized_guardian_config(raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    defaults = _guardian_config_defaults()
+    raw = raw if isinstance(raw, dict) else {}
+
+    intervention_level = str(raw.get("intervention_level", defaults["intervention_level"])).upper()
+    if intervention_level not in ALLOWED_INTERVENTION_LEVELS:
+        intervention_level = defaults["intervention_level"]
+
+    raw_thresholds = raw.get("guardian_thresholds", {})
+    if not isinstance(raw_thresholds, dict):
+        raw_thresholds = {}
+    raw_deviation = raw_thresholds.get("deviation_signals", {})
+    if not isinstance(raw_deviation, dict):
+        raw_deviation = {}
+    raw_l2 = raw_thresholds.get("l2_protection", {})
+    if not isinstance(raw_l2, dict):
+        raw_l2 = {}
+
+    repeated_skip = _coerce_int(
+        raw_deviation.get("repeated_skip"),
+        defaults["thresholds"]["deviation_signals"]["repeated_skip"],
+    )
+    l2_interruption = _coerce_int(
+        raw_deviation.get("l2_interruption"),
+        defaults["thresholds"]["deviation_signals"]["l2_interruption"],
+    )
+    stagnation_days = _coerce_int(
+        raw_deviation.get("stagnation_days"),
+        defaults["thresholds"]["deviation_signals"]["stagnation_days"],
+    )
+    l2_high = _coerce_float(raw_l2.get("high"), defaults["thresholds"]["l2_protection"]["high"])
+    l2_medium = _coerce_float(
+        raw_l2.get("medium"),
+        defaults["thresholds"]["l2_protection"]["medium"],
+    )
+    if l2_medium > l2_high:
+        l2_medium = l2_high
+
+    return {
+        "intervention_level": intervention_level,
+        "thresholds": {
+            "deviation_signals": {
+                "repeated_skip": repeated_skip,
+                "l2_interruption": l2_interruption,
+                "stagnation_days": stagnation_days,
+            },
+            "l2_protection": {"high": round(l2_high, 2), "medium": round(l2_medium, 2)},
+        },
+    }
+
+
+def _save_guardian_config(config_payload: Dict[str, Any]) -> None:
+    existing = _load_blueprint_yaml()
+    if not isinstance(existing, dict):
+        existing = {}
+    existing["intervention_level"] = config_payload["intervention_level"]
+    existing["guardian_thresholds"] = {
+        "deviation_signals": config_payload["thresholds"]["deviation_signals"],
+        "l2_protection": config_payload["thresholds"]["l2_protection"],
+    }
+    BLUEPRINT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(BLUEPRINT_CONFIG_PATH, "w", encoding="utf-8") as f:
+        yaml.safe_dump(existing, f, allow_unicode=True, sort_keys=False)
 
 
 def _anchor_payload(anchor) -> dict:
@@ -328,6 +459,62 @@ async def confirm_retrospective_intervention(request: RetrospectiveConfirmReques
 
     updated_payload = build_guardian_retrospective_response(days)
     return {"status": "confirmed", "retrospective": updated_payload}
+
+
+@router.get("/guardian/config")
+async def get_guardian_config():
+    config_payload = _normalized_guardian_config(_load_blueprint_yaml())
+    return {
+        "source_path": str(BLUEPRINT_CONFIG_PATH),
+        "config": config_payload,
+    }
+
+
+@router.put("/guardian/config")
+async def update_guardian_config(request: GuardianConfigUpdateRequest):
+    intervention_level = (
+        request.intervention_level.upper()
+        if isinstance(request.intervention_level, str) and request.intervention_level
+        else "SOFT"
+    )
+    if intervention_level not in ALLOWED_INTERVENTION_LEVELS:
+        raise HTTPException(
+            status_code=400,
+            detail="intervention_level must be one of OBSERVE_ONLY | SOFT | ASK",
+        )
+
+    high = _coerce_float(request.l2_protection.high, 0.75)
+    medium = _coerce_float(request.l2_protection.medium, 0.50)
+    if medium > high:
+        raise HTTPException(
+            status_code=400,
+            detail="l2_protection.medium cannot be greater than l2_protection.high",
+        )
+
+    payload = {
+        "intervention_level": intervention_level,
+        "thresholds": {
+            "deviation_signals": {
+                "repeated_skip": _coerce_int(request.deviation_signals.repeated_skip, 2),
+                "l2_interruption": _coerce_int(request.deviation_signals.l2_interruption, 1),
+                "stagnation_days": _coerce_int(request.deviation_signals.stagnation_days, 3),
+            },
+            "l2_protection": {"high": round(high, 2), "medium": round(medium, 2)},
+        },
+    }
+    _save_guardian_config(payload)
+    append_event(
+        {
+            "type": "guardian_config_updated",
+            "timestamp": datetime.now().isoformat(),
+            "payload": payload,
+        }
+    )
+    return {
+        "status": "updated",
+        "source_path": str(BLUEPRINT_CONFIG_PATH),
+        "config": payload,
+    }
 
 
 @router.get("/anchor/current")

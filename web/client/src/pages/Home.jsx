@@ -83,6 +83,11 @@ export default function Home() {
     const [anchorDiffLoading, setAnchorDiffLoading] = useState(false);
     const [activateAnchorLoading, setActivateAnchorLoading] = useState(false);
     const [activateAnchorModalOpen, setActivateAnchorModalOpen] = useState(false);
+    const [guardianConfig, setGuardianConfig] = useState(null);
+    const [guardianConfigLoading, setGuardianConfigLoading] = useState(false);
+    const [guardianConfigSaving, setGuardianConfigSaving] = useState(false);
+    const [guardianConfigDirty, setGuardianConfigDirty] = useState(false);
+    const [guardianConfigSavedAt, setGuardianConfigSavedAt] = useState(null);
 
     const signalNameMap = {
         repeated_skip: '重复跳过',
@@ -144,6 +149,7 @@ export default function Home() {
                 setAlignmentOverview(null);
                 setWeeklyAlignmentTrend(null);
                 setAnchorEffect(null);
+                setGuardianConfig(null);
                 const [profileRes, goalsRes, treeRes] = await Promise.allSettled([
                     api.get('/onboarding/status'),
                     api.get('/goals'),
@@ -160,16 +166,21 @@ export default function Home() {
                 if (treeRes.status === 'fulfilled') setGoalTree(treeRes.value.data.tree || []);
             }
 
-            const [tasksRes, currentRes, retroRes, effectRes] = await Promise.allSettled([
+            const [tasksRes, currentRes, retroRes, effectRes, guardianConfigRes] = await Promise.allSettled([
                 api.get('/tasks/list'),
                 api.get('/tasks/current'),
                 api.get('/retrospective', { params: { days: 7 } }),
-                api.get('/anchor/effect')
+                api.get('/anchor/effect'),
+                api.get('/guardian/config')
             ]);
             if (tasksRes.status === 'fulfilled') setTasks(tasksRes.value.data);
             if (currentRes.status === 'fulfilled') setCurrentTask(currentRes.value.data.task);
             if (retroRes.status === 'fulfilled') setRetrospective(retroRes.value.data);
             if (effectRes.status === 'fulfilled') setAnchorEffect(effectRes.value.data);
+            if (guardianConfigRes.status === 'fulfilled') {
+                setGuardianConfig(guardianConfigRes.value.data?.config || null);
+                setGuardianConfigDirty(false);
+            }
         } catch (e) {
             console.error(e);
             setError('加载数据失败');
@@ -299,6 +310,76 @@ export default function Home() {
         }
     };
 
+    const updateGuardianConfigField = (section, key, rawValue) => {
+        setGuardianConfig((prev) => {
+            if (!prev?.thresholds) return prev;
+            return {
+                ...prev,
+                thresholds: {
+                    ...prev.thresholds,
+                    [section]: {
+                        ...(prev.thresholds?.[section] || {}),
+                        [key]: rawValue
+                    }
+                }
+            };
+        });
+        setGuardianConfigDirty(true);
+    };
+
+    const updateGuardianInterventionLevel = (value) => {
+        setGuardianConfig((prev) => {
+            if (!prev) return prev;
+            return { ...prev, intervention_level: value };
+        });
+        setGuardianConfigDirty(true);
+    };
+
+    const refreshGuardianConfig = async () => {
+        if (guardianConfigLoading) return;
+        try {
+            setGuardianConfigLoading(true);
+            const res = await api.get('/guardian/config');
+            setGuardianConfig(res.data?.config || null);
+            setGuardianConfigDirty(false);
+        } catch (e) {
+            console.error(e);
+            setError('刷新阈值配置失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianConfigLoading(false);
+        }
+    };
+
+    const saveGuardianConfig = async () => {
+        if (!guardianConfig || guardianConfigSaving) return;
+        try {
+            setGuardianConfigSaving(true);
+            setError(null);
+            const payload = {
+                intervention_level: guardianConfig.intervention_level || 'SOFT',
+                deviation_signals: {
+                    repeated_skip: Number(guardianConfig.thresholds?.deviation_signals?.repeated_skip ?? 2),
+                    l2_interruption: Number(guardianConfig.thresholds?.deviation_signals?.l2_interruption ?? 1),
+                    stagnation_days: Number(guardianConfig.thresholds?.deviation_signals?.stagnation_days ?? 3)
+                },
+                l2_protection: {
+                    high: Number(guardianConfig.thresholds?.l2_protection?.high ?? 0.75),
+                    medium: Number(guardianConfig.thresholds?.l2_protection?.medium ?? 0.5)
+                }
+            };
+            const res = await api.put('/guardian/config', payload);
+            setGuardianConfig(res.data?.config || guardianConfig);
+            setGuardianConfigDirty(false);
+            setGuardianConfigSavedAt(new Date().toISOString());
+            await fetchAll();
+        } catch (e) {
+            console.error(e);
+            setError('保存 Guardian 阈值失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianConfigSaving(false);
+        }
+    };
+
     const getGoalProgress = (goalId) => {
         const goalTasks = [...(tasks.pending || []), ...(tasks.completed || [])].filter((t) => t.goal_id === goalId);
         const completedCount = (tasks.completed || []).filter((t) => t.goal_id === goalId).length;
@@ -334,6 +415,9 @@ export default function Home() {
     const l2ThresholdLabel = Number.isFinite(l2ThresholdHigh) && Number.isFinite(l2ThresholdMedium)
         ? `阈值: 高 ≥ ${Math.round(l2ThresholdHigh * 100)}% · 中 ≥ ${Math.round(l2ThresholdMedium * 100)}%`
         : null;
+    const guardianThresholds = guardianConfig?.thresholds || {};
+    const deviationCfg = guardianThresholds.deviation_signals || {};
+    const l2Cfg = guardianThresholds.l2_protection || {};
 
     if (loading) {
         return (
@@ -749,6 +833,118 @@ export default function Home() {
                                             </div>
                                         );
                                     })}
+                                </div>
+                            )}
+                        </div>
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Guardian 阈值配置</div>
+                                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={refreshGuardianConfig}
+                                        disabled={guardianConfigLoading || guardianConfigSaving}
+                                        style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                    >
+                                        {guardianConfigLoading ? '刷新中...' : '刷新'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn btn-primary"
+                                        onClick={saveGuardianConfig}
+                                        disabled={!guardianConfigDirty || guardianConfigSaving}
+                                        style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                    >
+                                        {guardianConfigSaving ? '保存中...' : '保存阈值'}
+                                    </button>
+                                </div>
+                            </div>
+                            {guardianConfig ? (
+                                <div style={{ marginTop: '0.5rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.45rem' }}>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        干预级别
+                                        <select
+                                            value={guardianConfig.intervention_level || 'SOFT'}
+                                            onChange={(e) => updateGuardianInterventionLevel(e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        >
+                                            <option value="OBSERVE_ONLY">OBSERVE_ONLY</option>
+                                            <option value="SOFT">SOFT</option>
+                                            <option value="ASK">ASK</option>
+                                        </select>
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        重复跳过阈值
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            value={deviationCfg.repeated_skip ?? 2}
+                                            onChange={(e) => updateGuardianConfigField('deviation_signals', 'repeated_skip', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        L2 中断阈值
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            value={deviationCfg.l2_interruption ?? 1}
+                                            onChange={(e) => updateGuardianConfigField('deviation_signals', 'l2_interruption', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        停滞天数阈值
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            value={deviationCfg.stagnation_days ?? 3}
+                                            onChange={(e) => updateGuardianConfigField('deviation_signals', 'stagnation_days', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        L2 高阈值
+                                        <input
+                                            type="number"
+                                            min="0"
+                                            max="1"
+                                            step="0.01"
+                                            value={l2Cfg.high ?? 0.75}
+                                            onChange={(e) => updateGuardianConfigField('l2_protection', 'high', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        L2 中阈值
+                                        <input
+                                            type="number"
+                                            min="0"
+                                            max="1"
+                                            step="0.01"
+                                            value={l2Cfg.medium ?? 0.5}
+                                            onChange={(e) => updateGuardianConfigField('l2_protection', 'medium', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                </div>
+                            ) : (
+                                <div style={{ marginTop: '0.45rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    当前无法加载配置，点击“刷新”重试。
+                                </div>
+                            )}
+                            {guardianConfigSavedAt && (
+                                <div style={{ marginTop: '0.35rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                    上次保存: {guardianConfigSavedAt}
                                 </div>
                             )}
                         </div>
