@@ -2,8 +2,8 @@
 Task Dispatcher for AI Life OS.
 Selects the current best task to present to the user based on schedule and context.
 """
-from datetime import datetime
-from typing import List, Optional
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional
 from core.models import Task, TaskStatus
 
 class TaskDispatcher:
@@ -62,8 +62,66 @@ class TaskDispatcher:
 
         return candidates[0]
 
-    def reschedule_overdue(self, tasks: List[Task], active_goals_ids: List[str]) -> List[Task]:
+    @staticmethod
+    def _normalized_date(value: Any) -> Optional[date]:
+        if isinstance(value, date):
+            return value
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _status_value(status: Any) -> str:
+        if hasattr(status, "value"):
+            return str(getattr(status, "value", "")).lower()
+        return str(status or "").lower()
+
+    def reschedule_overdue(
+        self,
+        tasks: List[Task],
+        active_goals_ids: List[str],
+        current_time: datetime = None,
+    ) -> List[Dict[str, Any]]:
         """
-        简单重排过期任务（暂未实现，Phase 3）
+        Collect overdue task updates for deterministic replay:
+        - only pending tasks
+        - only tasks tied to active goals (if active goal list provided)
+        - reschedule overdue date to today while preserving time preference
         """
-        pass
+        if current_time is None:
+            current_time = datetime.now()
+        today = current_time.date()
+        active_goal_set = {str(goal_id) for goal_id in active_goals_ids if goal_id}
+        updates: List[Dict[str, Any]] = []
+
+        for task in tasks:
+            if self._status_value(getattr(task, "status", None)) != TaskStatus.PENDING.value:
+                continue
+
+            task_goal_id = str(getattr(task, "goal_id", "") or "")
+            if active_goal_set and task_goal_id not in active_goal_set:
+                continue
+
+            scheduled_date = self._normalized_date(getattr(task, "scheduled_date", None))
+            if scheduled_date is None or scheduled_date >= today:
+                continue
+
+            scheduled_time = getattr(task, "scheduled_time", None) or "Anytime"
+            updates.append(
+                {
+                    "id": getattr(task, "id", None),
+                    "updates": {
+                        "scheduled_date": today.isoformat(),
+                        "scheduled_time": scheduled_time,
+                    },
+                    "meta": {
+                        "reason": "overdue_reschedule",
+                        "previous_date": scheduled_date.isoformat(),
+                    },
+                }
+            )
+
+        return updates

@@ -1,6 +1,7 @@
 # AI Life OS 功能迭代方案（基于设计初衷）
 
 > 创建日期：2026-02-10  
+> 最近更新：2026-02-11  
 > 适用版本：当前 `main` 分支（FastAPI + React + Event Sourcing + Goal Registry）
 
 ## 1. 设计初衷（从文档与代码抽象）
@@ -136,3 +137,63 @@ P2（增强）：
 结论：  
 先把“状态一致性 + 审计可追溯”打牢，再推进 Guardian 干预 MVP，最后做 Anchor 深度对齐。这样最符合项目设计初衷，也最能降低后续迭代成本。
 
+## 8. Iteration 4 回顾（Humanized Purpose Loop，已完成 2026-02-11）
+
+Iteration 4 已从“能力补齐”转向“人性化落地”，并交付以下核心能力：
+
+- `Overrule Instincts`：干预响应支持“当前代表哪个自我”的可见表达，降低被控制感。
+- `Outsource Chores`：skip/snooze 后提供恢复建议与自动重排，减少手工重规划负担。
+- `Protect Flourishing`：L2 会话具备开始/中断/完成闭环，保护从复盘前移到执行当下。
+- 新增人性化指标：`recovery_adoption_rate`、`friction_load`、`support_vs_override`。
+- 新增解释性输出：`why_this_suggestion`、`what_happens_next`。
+- 新增 `guardian_autotune` shadow 提议能力（有护栏、可审计、默认不自动应用）。
+
+详细执行记录见：
+`.taskflow/archive/2026-02-11_humanized-purpose-next-iteration_v1/task_plan.md`
+
+## 9. 下一轮建议（Iteration 5：Humanized Outcome Loop）
+
+在 Iteration 4 主链路落地后，下一轮优先从“功能是否存在”升级为“结果是否兑现”，持续对齐项目根本目的：
+
+- `Overrule Instincts`：做情境化干预节奏控制（摩擦预算 + 强度分层），避免提醒泛滥。
+- `Outsource Chores`：做批量 L1 自动化与自动拆分建议，进一步释放手工决策负担。
+- `Protect Flourishing`：提升 L2 会话恢复率与完成率，强化中断后重回深度工作的能力。
+- `Blueprint Alignment`：周复盘增加认知/体验/连接三维进展叙事，而不只展示比率。
+
+建议范围：
+- `core/retrospective.py`（North-Star 结果指标 + 三维叙事）
+- `core/steward.py`（干预节奏策略）
+- `core/task_dispatcher.py`（L1 批量自动化重排）
+- `core/goal_engine.py`（目标维度叙事支撑）
+- `web/backend/routers/api.py`（结果指标投影与策略配置）
+- `web/backend/routers/tasks.py`（恢复/拆分建议链路）
+- `web/client/src/pages/Home.jsx`（结果看板 + 低摩擦交互）
+- `config/blueprint.yaml`（保守阈值与回滚开关）
+
+建议产物：
+- 结果指标：`mundane_automation_coverage`、`l2_bloom_hours`、`human_trust_index`、`alignment_delta_weekly`
+- 运行策略：情境化干预频率控制、批量恢复建议、L2 中断恢复流程
+- 复盘输出：Blueprint 三维进展叙事（Wisdom / Experience / Connection）
+
+North-Star 指标口径（已确认，v1）：
+| Metric | Definition | Formula (7d rolling) |
+|------|------|------|
+| `mundane_automation_coverage` | 琐事是否被系统真正外包 | `adopted_auto_recovery / l1_recovery_opportunities` |
+| `l2_bloom_hours` | 卓越时段是否被真正释放 | `sum(completed_l2_session_minutes) / 60` |
+| `human_trust_index` | 干预是否被信任并采纳 | `0.5*support_ratio + 0.3*adoption_rate + 0.2*(1-friction_score)` |
+| `alignment_delta_weekly` | 行为是否更接近长期价值 | `avg_alignment_score(current_week) - avg_alignment_score(previous_week)` |
+
+口径补充：
+- `l1_recovery_opportunities`：统计窗口内所有 L1 `overdue + skip + snooze` 机会数。
+- `adopted_auto_recovery`：系统给出恢复建议后，72 小时内被采纳并完成。
+- `adoption_rate`：建议被确认并产生后续执行的比例。
+- `friction_score`：沿用现有 `friction_load.score`（`0-1`，越低越好）。
+
+初始目标阈值（v1）：
+- `mundane_automation_coverage >= 0.55`
+- `l2_bloom_hours` 相比基线周提升 `>= 20%`
+- `human_trust_index >= 0.65`
+- `alignment_delta_weekly > 0`
+
+详细执行拆解见：
+`.taskflow/active/humanized-purpose-outcome-iteration/task_plan.md`

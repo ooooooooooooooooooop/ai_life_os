@@ -1,6 +1,6 @@
 import json
 import shutil
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -294,15 +294,210 @@ def test_task_complete_and_skip_work_with_canonical_goal_ids(client):
     assert complete.status_code == 200
     assert complete.json()["task"]["id"] == "task_2"
 
-    skip = client.post("/api/v1/tasks/task_2/skip", json={"reason": "postponed"})
+    skip = client.post(
+        "/api/v1/tasks/task_2/skip",
+        json={"reason": "postponed", "context": "resource_blocked"},
+    )
     assert skip.status_code == 200
-    assert skip.json()["task"] is None
+    assert skip.json()["recovery_task_id"] == "task_2_recovery"
+    assert skip.json()["task"]["id"] == "task_2_recovery"
 
     listed = client.get("/api/v1/tasks/list")
     assert listed.status_code == 200
     completed_tasks = listed.json()["completed"]
+    pending_tasks = listed.json()["pending"]
     assert any(t["id"] == "task_1" and t["goal_id"] == goal.id for t in completed_tasks)
     assert any(t["id"] == "task_1" and t["goal_title"] == goal.title for t in completed_tasks)
+    assert any(t["id"] == "task_2_recovery" and t["goal_id"] == goal.id for t in pending_tasks)
+
+
+def test_task_skip_rejects_invalid_context(client):
+    service = GoalService()
+    goal = service.create_node(
+        title="Context Goal",
+        layer=GoalLayer.GOAL,
+        state=GoalState.ACTIVE,
+        source=GoalSource.USER_INPUT.value,
+    )
+    event_sourcing.append_event(
+        {"type": "task_created", "payload": {"task": _task_payload("task_ctx", goal.id, "09:00")}}
+    )
+
+    response = client.post(
+        "/api/v1/tasks/task_ctx/skip",
+        json={"reason": "later", "context": "invalid_ctx"},
+    )
+    assert response.status_code == 400
+
+
+def test_task_skip_creates_recovery_task_with_same_goal_id(client, isolated_runtime):
+    service = GoalService()
+    goal = service.create_node(
+        title="Recovery Goal",
+        layer=GoalLayer.GOAL,
+        state=GoalState.ACTIVE,
+        source=GoalSource.USER_INPUT.value,
+    )
+    event_sourcing.append_event(
+        {
+            "type": "task_created",
+            "payload": {"task": _task_payload("task_recover", goal.id, "09:00")},
+        }
+    )
+
+    response = client.post(
+        "/api/v1/tasks/task_recover/skip",
+        json={"reason": "too big", "context": "task_too_big"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload.get("recovery_task_id") == "task_recover_recovery"
+
+    listed = client.get("/api/v1/tasks/list")
+    assert listed.status_code == 200
+    pending_tasks = listed.json()["pending"]
+    recovery = next(t for t in pending_tasks if t["id"] == "task_recover_recovery")
+    assert recovery["goal_id"] == goal.id
+    assert "最小下一步" in recovery["description"]
+
+    lines = isolated_runtime.event_log.read_text(encoding="utf-8").strip().splitlines()
+    events = [json.loads(line) for line in lines if line.strip()]
+    skip_update = next(
+        e for e in events
+        if e.get("type") == "task_updated"
+        and (e.get("payload") or {}).get("id") == "task_recover"
+    )
+    assert skip_update["payload"]["updates"]["skip_context"] == "task_too_big"
+    recovery_created = next(
+        e for e in events
+        if e.get("type") == "task_created"
+        and ((e.get("payload") or {}).get("task") or {}).get("id") == "task_recover_recovery"
+    )
+    assert recovery_created["payload"]["task"]["goal_id"] == goal.id
+    recovery_suggested = next(
+        e for e in events if e.get("type") == "task_recovery_suggested"
+    )
+    assert recovery_suggested["payload"]["split_candidates"]
+    split_event = next(
+        e for e in events if e.get("type") == "task_split_candidates_suggested"
+    )
+    assert len(split_event["payload"]["candidates"]) == 3
+
+
+def test_tasks_current_reschedules_overdue_pending_task(client, isolated_runtime):
+    service = GoalService()
+    goal = service.create_node(
+        title="Overdue Goal",
+        layer=GoalLayer.GOAL,
+        state=GoalState.ACTIVE,
+        source=GoalSource.USER_INPUT.value,
+    )
+    overdue_payload = _task_payload("task_overdue", goal.id, "09:00")
+    overdue_payload["scheduled_date"] = (date.today() - timedelta(days=1)).isoformat()
+    event_sourcing.append_event({"type": "task_created", "payload": {"task": overdue_payload}})
+
+    response = client.get("/api/v1/tasks/current")
+    assert response.status_code == 200
+    task = response.json()["task"]
+    assert task["id"] == "task_overdue"
+    assert task["scheduled_date"] == date.today().isoformat()
+
+    events = [
+        json.loads(line)
+        for line in isolated_runtime.event_log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    reschedule_event = next(
+        e
+        for e in events
+        if e.get("type") == "task_updated"
+        and (e.get("payload") or {}).get("id") == "task_overdue"
+        and ((e.get("payload") or {}).get("meta") or {}).get("reason") == "overdue_reschedule"
+    )
+    assert (
+        (reschedule_event.get("payload") or {})
+        .get("updates", {})
+        .get("scheduled_date")
+        == date.today().isoformat()
+    )
+
+
+def test_recovery_batch_preview_and_apply(client, isolated_runtime):
+    service = GoalService()
+    goal = service.create_node(
+        title="Batch Recovery Goal",
+        layer=GoalLayer.GOAL,
+        state=GoalState.ACTIVE,
+        source=GoalSource.USER_INPUT.value,
+    )
+    past_day = (date.today() - timedelta(days=1)).isoformat()
+    event_sourcing.append_event(
+        {
+            "type": "task_created",
+            "payload": {
+                "task": {
+                    **_task_payload("task_a_recovery", goal.id, "09:00"),
+                    "scheduled_date": past_day,
+                    "status": "pending",
+                }
+            },
+        }
+    )
+    event_sourcing.append_event(
+        {
+            "type": "task_created",
+            "payload": {
+                "task": {
+                    **_task_payload("task_b_recovery", goal.id, "Afternoon"),
+                    "scheduled_date": past_day,
+                    "status": "pending",
+                }
+            },
+        }
+    )
+    event_sourcing.append_event(
+        {
+            "type": "task_created",
+            "payload": {
+                "task": {
+                    **_task_payload("task_c", goal.id, "Anytime"),
+                    "scheduled_date": date.today().isoformat(),
+                    "status": "pending",
+                }
+            },
+        }
+    )
+
+    preview = client.get("/api/v1/tasks/recovery/batch/preview")
+    assert preview.status_code == 200
+    preview_payload = preview.json()
+    assert preview_payload["count"] == 2
+    assert {task["id"] for task in preview_payload["tasks"]} == {
+        "task_a_recovery",
+        "task_b_recovery",
+    }
+
+    apply_resp = client.post("/api/v1/tasks/recovery/batch/apply")
+    assert apply_resp.status_code == 200
+    apply_payload = apply_resp.json()
+    assert apply_payload["recovery_batch"]["applied_count"] == 2
+    assert set(apply_payload["recovery_batch"]["task_ids"]) == {
+        "task_a_recovery",
+        "task_b_recovery",
+    }
+
+    events = [
+        json.loads(line)
+        for line in isolated_runtime.event_log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    batch_updates = [
+        e
+        for e in events
+        if e.get("type") == "task_updated"
+        and ((e.get("payload") or {}).get("meta") or {}).get("reason") == "recovery_batch_apply"
+    ]
+    assert len(batch_updates) == 2
 
 
 def test_retrospective_and_state_expose_intervention_contract(client, monkeypatch):

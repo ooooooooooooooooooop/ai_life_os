@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime
 from types import SimpleNamespace
 import yaml
 
@@ -190,6 +191,30 @@ def test_state_endpoint_includes_stable_audit_shape(monkeypatch):
                 "trend": [],
                 "thresholds": {"high": 0.75, "medium": 0.5},
             },
+            "humanization_metrics": {
+                "recovery_adoption_rate": {"rate": 0.5},
+                "friction_load": {"score": 0.67, "level": "high"},
+                "support_vs_override": {"support_ratio": 0.4, "mode": "balanced"},
+            },
+            "intervention_policy": {
+                "mode": "balanced_intervention",
+                "reason": "Medium-severity deviation is active, so Guardian uses balanced cadence.",
+                "friction_budget": {"suppressed": False},
+            },
+            "north_star_metrics": {
+                "window_days": 7,
+                "mundane_automation_coverage": {"rate": 0.55, "met_target": True},
+                "l2_bloom_hours": {"hours": 3.0, "met_target": True},
+                "human_trust_index": {"score": 0.7, "met_target": True},
+                "alignment_delta_weekly": {"delta": 4.0, "met_target": True},
+                "targets_met": {"met_count": 4, "total": 4},
+            },
+            "explainability": {
+                "why_this_suggestion": "Suggestion is triggered by: repeated_skip 2/2.",
+                "what_happens_next": (
+                    "ASK mode is active: confirm this suggestion or respond with context."
+                ),
+            },
             "confirmation_action": {
                 "required": True,
                 "confirmed": False,
@@ -205,12 +230,29 @@ def test_state_endpoint_includes_stable_audit_shape(monkeypatch):
     assert "audit" in payload
     assert payload["audit"]["strategy"] == "state_projection"
     assert isinstance(payload["audit"]["used_state_fields"], list)
+    assert "retrospective.humanization_metrics" in payload["audit"]["used_state_fields"]
+    assert "retrospective.north_star_metrics" in payload["audit"]["used_state_fields"]
+    assert "retrospective.intervention_policy" in payload["audit"]["used_state_fields"]
+    assert "retrospective.blueprint_narrative" in payload["audit"]["used_state_fields"]
     assert set(payload["audit"]["decision_reason"]) == {"trigger", "constraint", "risk"}
     assert payload["guardian"]["intervention_level"] == "ASK"
     assert payload["guardian"]["pending_confirmation"] is True
     assert payload["guardian"]["confirmation_action"]["endpoint"] == "/api/v1/retrospective/confirm"
+    assert "guardian_role" in payload["guardian"]
+    assert payload["guardian"]["policy"]["mode"] == "balanced_intervention"
+    assert "blueprint_narrative" in payload["guardian"]
+    assert payload["guardian"]["explainability"]["why_this_suggestion"].startswith(
+        "Suggestion is triggered by:"
+    )
     assert payload["guardian"]["metrics"]["l2_protection_rate"] == 0.6
     assert payload["guardian"]["metrics"]["l2_protection_thresholds"]["high"] == 0.75
+    assert payload["guardian"]["metrics"]["recovery_adoption_rate"] == 0.5
+    assert payload["guardian"]["metrics"]["friction_load"]["score"] == 0.67
+    assert payload["guardian"]["metrics"]["support_vs_override"]["mode"] == "balanced"
+    assert payload["guardian"]["metrics"]["north_star"]["window_days"] == 7
+    assert payload["guardian"]["metrics"]["mundane_automation_coverage"] == 0.55
+    assert payload["guardian"]["metrics"]["human_trust_index"] == 0.7
+    assert payload["guardian"]["metrics"]["alignment_delta_weekly"] == 4.0
     assert "alignment" in payload
     assert "goal_summary" in payload["alignment"]
     assert payload["meta"]["event_schema_version"] == event_sourcing.EVENT_SCHEMA_VERSION
@@ -228,6 +270,56 @@ def test_get_guardian_config_defaults_when_file_missing(monkeypatch, tmp_path):
     assert config["thresholds"]["l2_protection"]["high"] == 0.75
     assert config["authority"]["escalation"]["window_days"] == 7
     assert config["authority"]["safe_mode"]["enabled"] is True
+
+
+def test_get_guardian_autotune_config_defaults_when_file_missing(monkeypatch, tmp_path):
+    missing_path = tmp_path / "blueprint.yaml"
+    monkeypatch.setattr(api_router, "BLUEPRINT_CONFIG_PATH", missing_path)
+
+    payload = asyncio.run(api_router.get_guardian_autotune_config())
+    config = payload["config"]
+
+    assert config["enabled"] is False
+    assert config["mode"] == "shadow"
+    assert config["llm_enabled"] is True
+    assert config["trigger"]["lookback_days"] == 7
+    assert config["guardrails"]["max_int_step"] == 1
+
+
+def test_update_guardian_autotune_config_persists_and_emits_event(monkeypatch, tmp_path):
+    config_path = tmp_path / "blueprint.yaml"
+    config_path.write_text("intervention_level: SOFT\n", encoding="utf-8")
+    emitted = []
+
+    monkeypatch.setattr(api_router, "BLUEPRINT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(api_router, "append_event", lambda event: emitted.append(event))
+
+    req = api_router.GuardianAutoTuneConfigUpdateRequest(
+        enabled=True,
+        mode="shadow",
+        llm_enabled=False,
+        trigger=api_router.GuardianAutoTuneTriggerConfigRequest(
+            lookback_days=9,
+            min_event_count=12,
+            cooldown_hours=36,
+        ),
+        guardrails=api_router.GuardianAutoTuneGuardrailsConfigRequest(
+            max_int_step=1,
+            max_float_step=0.05,
+            min_confidence=0.6,
+        ),
+    )
+
+    payload = asyncio.run(api_router.update_guardian_autotune_config(req))
+    assert payload["status"] == "updated"
+    assert payload["config"]["enabled"] is True
+    assert payload["config"]["llm_enabled"] is False
+    assert payload["config"]["trigger"]["cooldown_hours"] == 36
+    assert emitted and emitted[0]["type"] == "guardian_autotune_config_updated"
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["guardian_autotune"]["enabled"] is True
+    assert saved["guardian_autotune"]["trigger"]["min_event_count"] == 12
 
 
 def test_update_guardian_config_persists_and_emits_event(monkeypatch, tmp_path):
@@ -349,9 +441,15 @@ def test_sys_cycle_normalizes_audit_shape(monkeypatch):
             return {"actions": [], "executed_auto_tasks": [], "audit": {"strategy": "custom"}}
 
     monkeypatch.setattr(api_router, "get_steward", lambda: DummySteward())
+    monkeypatch.setattr(
+        api_router,
+        "_run_guardian_autotune_shadow",
+        lambda trigger="cycle": {"status": "disabled", "mode": "shadow"},
+    )
 
     payload = asyncio.run(api_router.trigger_cycle())
     assert payload["status"] == "cycled"
+    assert payload["guardian_autotune"]["status"] == "disabled"
     assert payload["audit"]["strategy"] == "custom"
     assert isinstance(payload["audit"]["used_state_fields"], list)
     assert set(payload["audit"]["decision_reason"]) == {"trigger", "constraint", "risk"}
@@ -376,11 +474,117 @@ def test_sys_cycle_preserves_anchor_audit_extension(monkeypatch):
             }
 
     monkeypatch.setattr(api_router, "get_steward", lambda: DummySteward())
+    monkeypatch.setattr(
+        api_router,
+        "_run_guardian_autotune_shadow",
+        lambda trigger="cycle": {"status": "disabled", "mode": "shadow"},
+    )
     payload = asyncio.run(api_router.trigger_cycle())
 
     assert "anchor" in payload["audit"]
     assert payload["audit"]["anchor"]["enabled"] is True
     assert payload["audit"]["anchor"]["blocked_actions"] == 1
+
+
+def test_run_guardian_autotune_shadow_proposes_patch(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(
+        api_router,
+        "_load_blueprint_yaml",
+        lambda: {
+            "intervention_level": "SOFT",
+            "guardian_thresholds": {
+                "deviation_signals": {
+                    "repeated_skip": 2,
+                    "l2_interruption": 1,
+                    "stagnation_days": 3,
+                },
+                "l2_protection": {"high": 0.75, "medium": 0.50},
+            },
+            "guardian_autotune": {
+                "enabled": True,
+                "mode": "shadow",
+                "llm_enabled": False,
+                "trigger": {
+                    "lookback_days": 7,
+                    "min_event_count": 1,
+                    "cooldown_hours": 24,
+                },
+                "guardrails": {
+                    "max_int_step": 1,
+                    "max_float_step": 0.05,
+                    "min_confidence": 0.55,
+                },
+            },
+        },
+    )
+    monkeypatch.setattr(
+        api_router,
+        "_load_events_for_days",
+        lambda days: [{"type": "task_updated", "timestamp": "2026-02-11T10:00:00"}],
+    )
+    monkeypatch.setattr(api_router, "_load_latest_event", lambda event_type: None)
+    monkeypatch.setattr(
+        api_router,
+        "build_guardian_retrospective_response",
+        lambda days=7: {
+            "humanization_metrics": {
+                "friction_load": {"score": 0.82, "level": "high"},
+                "recovery_adoption_rate": {"rate": 0.25},
+                "support_vs_override": {"support_ratio": 0.2},
+            },
+            "l2_protection": {"ratio": 0.3, "level": "low"},
+            "deviation_signals": [],
+        },
+    )
+    monkeypatch.setattr(api_router, "append_event", lambda event: emitted.append(event))
+
+    payload = asyncio.run(
+        api_router.run_guardian_autotune_shadow(
+            api_router.GuardianAutoTuneRunRequest(trigger="manual")
+        )
+    )
+    assert payload["status"] == "proposed"
+    assert payload["mode"] == "shadow"
+    assert "repeated_skip" in payload["proposal"]["patch"]
+    assert emitted and emitted[0]["type"] == "guardian_autotune_shadow_proposed"
+
+
+def test_run_guardian_autotune_shadow_respects_cooldown(monkeypatch):
+    monkeypatch.setattr(
+        api_router,
+        "_load_blueprint_yaml",
+        lambda: {
+            "guardian_autotune": {
+                "enabled": True,
+                "mode": "shadow",
+                "llm_enabled": False,
+                "trigger": {
+                    "lookback_days": 7,
+                    "min_event_count": 1,
+                    "cooldown_hours": 24,
+                },
+                "guardrails": {
+                    "max_int_step": 1,
+                    "max_float_step": 0.05,
+                    "min_confidence": 0.55,
+                },
+            }
+        },
+    )
+    monkeypatch.setattr(
+        api_router,
+        "_load_latest_event",
+        lambda event_type: {"type": event_type, "timestamp": datetime.now().isoformat()},
+    )
+
+    payload = asyncio.run(
+        api_router.run_guardian_autotune_shadow(
+            api_router.GuardianAutoTuneRunRequest(trigger="manual")
+        )
+    )
+    assert payload["status"] == "skipped"
+    assert payload["reason"] == "cooldown_active"
 
 
 def test_confirm_retrospective_intervention_appends_confirmation_event(monkeypatch):
@@ -434,13 +638,18 @@ def test_confirm_retrospective_intervention_appends_confirmation_event(monkeypat
     monkeypatch.setattr(api_router, "build_guardian_retrospective_response", fake_build)
     monkeypatch.setattr(api_router, "append_event", lambda event: emitted.append(event))
 
-    req = api_router.RetrospectiveConfirmRequest(days=7, fingerprint="gcf_test_1")
+    req = api_router.RetrospectiveConfirmRequest(
+        days=7,
+        fingerprint="gcf_test_1",
+        context="recovering",
+    )
     payload = asyncio.run(api_router.confirm_retrospective_intervention(req))
 
     assert payload["status"] == "confirmed"
     assert emitted
     assert emitted[0]["type"] == "guardian_intervention_confirmed"
     assert emitted[0]["payload"]["fingerprint"] == "gcf_test_1"
+    assert emitted[0]["payload"]["context"] == "recovering"
     assert emitted[0]["payload"]["signals"] == ["repeated_skip"]
 
 
@@ -535,6 +744,7 @@ def test_respond_retrospective_intervention_appends_response_event(monkeypatch):
         days=7,
         fingerprint="gcf_resp_1",
         action="dismiss",
+        context="instinct_escape",
     )
     payload = asyncio.run(api_router.respond_retrospective_intervention(req))
 
@@ -542,6 +752,45 @@ def test_respond_retrospective_intervention_appends_response_event(monkeypatch):
     assert payload["action"] == "dismiss"
     assert emitted and emitted[0]["type"] == "guardian_intervention_responded"
     assert emitted[0]["payload"]["fingerprint"] == "gcf_resp_1"
+    assert emitted[0]["payload"]["context"] == "instinct_escape"
+
+
+def test_respond_retrospective_intervention_rejects_invalid_context(monkeypatch):
+    monkeypatch.setattr(
+        api_router,
+        "build_guardian_retrospective_response",
+        lambda days=7: {
+            "period": {"days": 7},
+            "suggestion": "keep focus",
+            "display": True,
+            "require_confirm": False,
+            "suggestion_sources": [],
+            "response_action": {
+                "required": False,
+                "pending": False,
+                "fingerprint": "gcf_ctx",
+                "latest": None,
+            },
+            "confirmation_action": {
+                "required": False,
+                "confirmed": False,
+                "fingerprint": "gcf_ctx",
+            },
+            "authority": {"safe_mode": {"active": False, "recommendation": {}}},
+        },
+    )
+    req = api_router.RetrospectiveRespondRequest(
+        days=7,
+        fingerprint="gcf_ctx",
+        action="dismiss",
+        context="invalid_context",
+    )
+    try:
+        asyncio.run(api_router.respond_retrospective_intervention(req))
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+    else:
+        assert False, "Expected 400 for invalid guardian response context"
 
 
 def test_respond_retrospective_intervention_can_enter_safe_mode(monkeypatch):
@@ -714,6 +963,123 @@ def test_respond_retrospective_confirm_works_in_soft_mode(monkeypatch):
 
     assert payload["status"] == "confirmed"
     assert emitted and emitted[0]["type"] == "guardian_intervention_confirmed"
+
+
+def test_start_l2_session_appends_event(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(api_router, "append_event", lambda event: emitted.append(event))
+    monkeypatch.setattr(
+        api_router,
+        "build_guardian_retrospective_response",
+        lambda days=7: {"l2_session": {"active_session": True, "active_session_id": "sess_1"}},
+    )
+
+    req = api_router.L2SessionActionRequest(
+        session_id="sess_1",
+        note="deep work",
+        intention="Finish the proposal draft section.",
+    )
+    payload = asyncio.run(api_router.start_l2_session(req))
+
+    assert payload["status"] == "started"
+    assert payload["session_id"] == "sess_1"
+    assert emitted and emitted[0]["type"] == "l2_session_started"
+    assert emitted[0]["payload"]["session_id"] == "sess_1"
+    assert emitted[0]["payload"]["intention"] == "Finish the proposal draft section."
+
+
+def test_resume_l2_session_appends_event(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(api_router, "append_event", lambda event: emitted.append(event))
+    monkeypatch.setattr(api_router, "_resolve_resumable_l2_session_id", lambda: "sess_2")
+    monkeypatch.setattr(
+        api_router,
+        "build_guardian_retrospective_response",
+        lambda days=7: {"l2_session": {"active_session": True, "active_session_id": "sess_2"}},
+    )
+
+    req = api_router.L2SessionActionRequest(resume_step="Re-enter by executing first TODO.")
+    payload = asyncio.run(api_router.resume_l2_session(req))
+
+    assert payload["status"] == "resumed"
+    assert payload["session_id"] == "sess_2"
+    assert emitted and emitted[0]["type"] == "l2_session_resumed"
+    assert emitted[0]["payload"]["resume_step"] == "Re-enter by executing first TODO."
+
+
+def test_resume_l2_session_requires_interrupt(monkeypatch):
+    monkeypatch.setattr(api_router, "_resolve_resumable_l2_session_id", lambda: None)
+
+    req = api_router.L2SessionActionRequest()
+    try:
+        asyncio.run(api_router.resume_l2_session(req))
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+    else:
+        assert False, "Expected 400 when no interrupted L2 session is available"
+
+
+def test_interrupt_l2_session_appends_event(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(api_router, "append_event", lambda event: emitted.append(event))
+    monkeypatch.setattr(
+        api_router,
+        "build_guardian_retrospective_response",
+        lambda days=7: {"l2_session": {"active_session": False, "active_session_id": None}},
+    )
+
+    req = api_router.L2SessionActionRequest(session_id="sess_2", reason="energy_drop")
+    payload = asyncio.run(api_router.interrupt_l2_session(req))
+
+    assert payload["status"] == "interrupted"
+    assert payload["session_id"] == "sess_2"
+    assert payload["reason"] == "energy_drop"
+    assert emitted and emitted[0]["type"] == "l2_session_interrupted"
+    assert emitted[0]["payload"]["reason"] == "energy_drop"
+
+
+def test_interrupt_l2_session_rejects_invalid_reason(monkeypatch):
+    monkeypatch.setattr(
+        api_router,
+        "build_guardian_retrospective_response",
+        lambda days=7: {"l2_session": {"active_session": True, "active_session_id": "sess_x"}},
+    )
+    req = api_router.L2SessionActionRequest(reason="invalid_reason")
+    try:
+        asyncio.run(api_router.interrupt_l2_session(req))
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+    else:
+        assert False, "Expected 400 for invalid l2 interrupt reason"
+
+
+def test_complete_l2_session_requires_active_session(monkeypatch):
+    monkeypatch.setattr(api_router, "_resolve_active_l2_session_id", lambda: None)
+    req = api_router.L2SessionActionRequest()
+    try:
+        asyncio.run(api_router.complete_l2_session(req))
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+    else:
+        assert False, "Expected 400 when no active L2 session is available"
+
+
+def test_complete_l2_session_appends_reflection(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(api_router, "append_event", lambda event: emitted.append(event))
+    monkeypatch.setattr(api_router, "_resolve_active_l2_session_id", lambda: "sess_3")
+    monkeypatch.setattr(
+        api_router,
+        "build_guardian_retrospective_response",
+        lambda days=7: {"l2_session": {"active_session": False, "active_session_id": None}},
+    )
+    req = api_router.L2SessionActionRequest(reflection="Closed the hardest part first.")
+    payload = asyncio.run(api_router.complete_l2_session(req))
+
+    assert payload["status"] == "completed"
+    assert payload["session_id"] == "sess_3"
+    assert emitted and emitted[0]["type"] == "l2_session_completed"
+    assert emitted[0]["payload"]["reflection"] == "Closed the hardest part first."
 
 
 def test_steward_anchor_filter_records_reasons(tmp_path):

@@ -157,6 +157,11 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
                     if hasattr(task, k):
                         if k == "status" and isinstance(v, str):
                             v = TaskStatus(v)
+                        if k == "scheduled_date" and isinstance(v, str):
+                            try:
+                                v = date.fromisoformat(v)
+                            except ValueError:
+                                pass
                         setattr(task, k, v)
                 break
 
@@ -187,14 +192,16 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
 
     elif event_type == "guardian_intervention_confirmed":
         state.setdefault("guardian", {})
+        response_payload = payload if isinstance(payload, dict) else {}
         state["guardian"]["last_intervention_confirmation"] = {
             "timestamp": timestamp,
-            "payload": payload if isinstance(payload, dict) else {},
+            "payload": response_payload,
         }
         state["guardian"]["last_intervention_response"] = {
             "timestamp": timestamp,
             "action": "confirm",
-            "payload": payload if isinstance(payload, dict) else {},
+            "context": response_payload.get("context"),
+            "payload": response_payload,
         }
 
     elif event_type == "guardian_intervention_responded":
@@ -203,6 +210,7 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
         state["guardian"]["last_intervention_response"] = {
             "timestamp": timestamp,
             "action": response_payload.get("action"),
+            "context": response_payload.get("context"),
             "payload": response_payload,
         }
 

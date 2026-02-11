@@ -30,6 +30,23 @@ guardian_authority:
     recovery_confirmations: 2
     cooldown_hours: 24
 
+# Guardian auto-tuning (shadow mode):
+# - enabled: run proposal generation automatically during /sys/cycle.
+# - mode: currently only "shadow" is supported; proposals are not applied.
+# - llm_enabled: allow LLM proposal generation, still constrained by guardrails.
+guardian_autotune:
+  enabled: true
+  mode: shadow
+  llm_enabled: true
+  trigger:
+    lookback_days: 7
+    min_event_count: 20
+    cooldown_hours: 24
+  guardrails:
+    max_int_step: 1
+    max_float_step: 0.05
+    min_confidence: 0.55
+
 principles:
   - name: "life_value"
     weight: 0.35

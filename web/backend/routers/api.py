@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -14,11 +14,13 @@ from core.event_sourcing import EVENT_LOG_PATH, EVENT_SCHEMA_VERSION, append_eve
 from core.feedback_classifier import classify_feedback
 from core.goal_service import GoalService
 from core.interaction_handler import InteractionHandler
+from core.llm_adapter import get_llm
 from core.objective_engine.models import GoalState
 from core.objective_engine.registry import GoalRegistry
 from core.retrospective import build_guardian_retrospective_response
 from core.snapshot_manager import create_snapshot
 from core.steward import Steward
+from core.utils import parse_llm_json
 from scheduler.daily_tick import ensure_tick_applied
 
 router = APIRouter()
@@ -46,6 +48,7 @@ class RetrospectiveConfirmRequest(BaseModel):
     days: int = 7
     fingerprint: Optional[str] = None
     note: Optional[str] = None
+    context: Optional[str] = None
 
 
 class RetrospectiveRespondRequest(BaseModel):
@@ -53,6 +56,16 @@ class RetrospectiveRespondRequest(BaseModel):
     fingerprint: Optional[str] = None
     action: str = "confirm"
     note: Optional[str] = None
+    context: Optional[str] = None
+
+
+class L2SessionActionRequest(BaseModel):
+    session_id: Optional[str] = None
+    reason: Optional[str] = None
+    note: Optional[str] = None
+    intention: Optional[str] = None
+    resume_step: Optional[str] = None
+    reflection: Optional[str] = None
 
 
 class AnchorActivateRequest(BaseModel):
@@ -99,6 +112,34 @@ class GuardianConfigUpdateRequest(BaseModel):
     authority: Optional[GuardianAuthorityConfigRequest] = None
 
 
+class GuardianAutoTuneTriggerConfigRequest(BaseModel):
+    lookback_days: int = 7
+    min_event_count: int = 20
+    cooldown_hours: int = 24
+
+
+class GuardianAutoTuneGuardrailsConfigRequest(BaseModel):
+    max_int_step: int = 1
+    max_float_step: float = 0.05
+    min_confidence: float = 0.55
+
+
+class GuardianAutoTuneConfigUpdateRequest(BaseModel):
+    enabled: bool = False
+    mode: str = "shadow"
+    llm_enabled: bool = True
+    trigger: GuardianAutoTuneTriggerConfigRequest = Field(
+        default_factory=GuardianAutoTuneTriggerConfigRequest
+    )
+    guardrails: GuardianAutoTuneGuardrailsConfigRequest = Field(
+        default_factory=GuardianAutoTuneGuardrailsConfigRequest
+    )
+
+
+class GuardianAutoTuneRunRequest(BaseModel):
+    trigger: str = "manual"
+
+
 def get_steward() -> Steward:
     state = ensure_tick_applied()
     registry = GoalRegistry()
@@ -118,6 +159,20 @@ BLUEPRINT_PATH = (
 BLUEPRINT_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "blueprint.yaml"
 ALLOWED_INTERVENTION_LEVELS = {"OBSERVE_ONLY", "SOFT", "ASK"}
 ALLOWED_GUARDIAN_RESPONSE_ACTIONS = {"confirm", "snooze", "dismiss"}
+ALLOWED_GUARDIAN_RESPONSE_CONTEXTS = {
+    "recovering",
+    "resource_blocked",
+    "task_too_big",
+    "instinct_escape",
+}
+ALLOWED_L2_SESSION_INTERRUPT_REASONS = {
+    "context_switch",
+    "external_interrupt",
+    "energy_drop",
+    "tooling_blocked",
+    "other",
+}
+ALLOWED_GUARDIAN_AUTOTUNE_MODES = {"shadow"}
 
 
 def _coerce_int(value: Any, default: int, min_value: int = 1, max_value: int = 365) -> int:
@@ -166,6 +221,24 @@ def _guardian_config_defaults() -> Dict[str, Any]:
                 "recovery_confirmations": 2,
                 "cooldown_hours": 24,
             },
+        },
+    }
+
+
+def _guardian_autotune_defaults() -> Dict[str, Any]:
+    return {
+        "enabled": False,
+        "mode": "shadow",
+        "llm_enabled": True,
+        "trigger": {
+            "lookback_days": 7,
+            "min_event_count": 20,
+            "cooldown_hours": 24,
+        },
+        "guardrails": {
+            "max_int_step": 1,
+            "max_float_step": 0.05,
+            "min_confidence": 0.55,
         },
     }
 
@@ -314,6 +387,77 @@ def _normalized_guardian_config(raw: Optional[Dict[str, Any]] = None) -> Dict[st
     }
 
 
+def _normalized_guardian_autotune_config(raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    defaults = _guardian_autotune_defaults()
+    raw = raw if isinstance(raw, dict) else {}
+    raw_autotune = raw.get("guardian_autotune", {})
+    if not isinstance(raw_autotune, dict):
+        raw_autotune = {}
+
+    mode = str(raw_autotune.get("mode", defaults["mode"])).strip().lower()
+    if mode not in ALLOWED_GUARDIAN_AUTOTUNE_MODES:
+        mode = defaults["mode"]
+
+    raw_trigger = raw_autotune.get("trigger", {})
+    if not isinstance(raw_trigger, dict):
+        raw_trigger = {}
+    raw_guardrails = raw_autotune.get("guardrails", {})
+    if not isinstance(raw_guardrails, dict):
+        raw_guardrails = {}
+
+    return {
+        "enabled": bool(raw_autotune.get("enabled", defaults["enabled"])),
+        "mode": mode,
+        "llm_enabled": bool(raw_autotune.get("llm_enabled", defaults["llm_enabled"])),
+        "trigger": {
+            "lookback_days": _coerce_int(
+                raw_trigger.get("lookback_days"),
+                defaults["trigger"]["lookback_days"],
+                min_value=1,
+                max_value=30,
+            ),
+            "min_event_count": _coerce_int(
+                raw_trigger.get("min_event_count"),
+                defaults["trigger"]["min_event_count"],
+                min_value=1,
+                max_value=9999,
+            ),
+            "cooldown_hours": _coerce_int(
+                raw_trigger.get("cooldown_hours"),
+                defaults["trigger"]["cooldown_hours"],
+                min_value=1,
+                max_value=168,
+            ),
+        },
+        "guardrails": {
+            "max_int_step": _coerce_int(
+                raw_guardrails.get("max_int_step"),
+                defaults["guardrails"]["max_int_step"],
+                min_value=1,
+                max_value=3,
+            ),
+            "max_float_step": round(
+                _coerce_float(
+                    raw_guardrails.get("max_float_step"),
+                    defaults["guardrails"]["max_float_step"],
+                    min_value=0.01,
+                    max_value=0.2,
+                ),
+                2,
+            ),
+            "min_confidence": round(
+                _coerce_float(
+                    raw_guardrails.get("min_confidence"),
+                    defaults["guardrails"]["min_confidence"],
+                    min_value=0.0,
+                    max_value=1.0,
+                ),
+                2,
+            ),
+        },
+    }
+
+
 def _save_guardian_config(config_payload: Dict[str, Any]) -> None:
     existing = _load_blueprint_yaml()
     if not isinstance(existing, dict):
@@ -329,6 +473,26 @@ def _save_guardian_config(config_payload: Dict[str, Any]) -> None:
     existing["guardian_authority"] = {
         "escalation": authority_payload.get("escalation", {}),
         "safe_mode": authority_payload.get("safe_mode", {}),
+    }
+    BLUEPRINT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(BLUEPRINT_CONFIG_PATH, "w", encoding="utf-8") as f:
+        yaml.safe_dump(existing, f, allow_unicode=True, sort_keys=False)
+
+
+def _save_guardian_autotune_config(config_payload: Dict[str, Any]) -> None:
+    existing = _load_blueprint_yaml()
+    if not isinstance(existing, dict):
+        existing = {}
+    existing["guardian_autotune"] = {
+        "enabled": bool(config_payload.get("enabled", False)),
+        "mode": str(config_payload.get("mode", "shadow")).lower(),
+        "llm_enabled": bool(config_payload.get("llm_enabled", True)),
+        "trigger": (config_payload.get("trigger") if isinstance(config_payload, dict) else {})
+        or {},
+        "guardrails": (
+            config_payload.get("guardrails") if isinstance(config_payload, dict) else {}
+        )
+        or {},
     }
     BLUEPRINT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(BLUEPRINT_CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -390,6 +554,487 @@ def _load_latest_event(event_type: str) -> Optional[dict]:
         if event.get("type") == event_type:
             return event
     return None
+
+
+def _parse_event_timestamp(raw_ts: Any) -> Optional[datetime]:
+    if not isinstance(raw_ts, str) or not raw_ts.strip():
+        return None
+    try:
+        return datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _load_events_for_days(days: int) -> list:
+    if not EVENT_LOG_PATH.exists():
+        return []
+    cutoff = datetime.now() - timedelta(days=max(1, int(days)))
+    events = []
+    with open(EVENT_LOG_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            ev_time = _parse_event_timestamp(event.get("timestamp"))
+            if ev_time is None or ev_time >= cutoff:
+                events.append(event)
+    return events
+
+
+def _clamp_step_int(
+    *,
+    current: int,
+    target: Any,
+    max_step: int,
+    min_value: int,
+    max_value: int,
+) -> int:
+    current_value = _coerce_int(current, current, min_value=min_value, max_value=max_value)
+    target_value = _coerce_int(target, current_value, min_value=min_value, max_value=max_value)
+    max_step = _coerce_int(max_step, 1, min_value=1, max_value=3)
+    delta = max(-max_step, min(max_step, target_value - current_value))
+    return _coerce_int(
+        current_value + delta,
+        current_value,
+        min_value=min_value,
+        max_value=max_value,
+    )
+
+
+def _clamp_step_float(
+    *,
+    current: float,
+    target: Any,
+    max_step: float,
+    min_value: float,
+    max_value: float,
+) -> float:
+    current_value = _coerce_float(current, current, min_value=min_value, max_value=max_value)
+    target_value = _coerce_float(target, current_value, min_value=min_value, max_value=max_value)
+    max_step = _coerce_float(max_step, 0.05, min_value=0.01, max_value=0.2)
+    delta = max(-max_step, min(max_step, target_value - current_value))
+    return round(
+        _coerce_float(
+            current_value + delta,
+            current_value,
+            min_value=min_value,
+            max_value=max_value,
+        ),
+        2,
+    )
+
+
+def _deterministic_guardian_autotune_candidate(
+    *,
+    current_config: Dict[str, Any],
+    retrospective: Dict[str, Any],
+) -> Dict[str, Any]:
+    deviation = (
+        (current_config.get("thresholds") or {}).get("deviation_signals")
+        if isinstance(current_config.get("thresholds"), dict)
+        else {}
+    )
+    deviation = deviation if isinstance(deviation, dict) else {}
+    l2 = (
+        (current_config.get("thresholds") or {}).get("l2_protection")
+        if isinstance(current_config.get("thresholds"), dict)
+        else {}
+    )
+    l2 = l2 if isinstance(l2, dict) else {}
+
+    metrics = retrospective.get("humanization_metrics") or {}
+    if not isinstance(metrics, dict):
+        metrics = {}
+    friction = (
+        metrics.get("friction_load")
+        if isinstance(metrics.get("friction_load"), dict)
+        else {}
+    )
+    recovery = (
+        metrics.get("recovery_adoption_rate")
+        if isinstance(metrics.get("recovery_adoption_rate"), dict)
+        else {}
+    )
+    support = (
+        metrics.get("support_vs_override")
+        if isinstance(metrics.get("support_vs_override"), dict)
+        else {}
+    )
+    l2_protection = retrospective.get("l2_protection") or {}
+    if not isinstance(l2_protection, dict):
+        l2_protection = {}
+
+    friction_score = _coerce_float(friction.get("score"), 0.0, min_value=0.0, max_value=1.0)
+    recovery_rate_raw = recovery.get("rate")
+    support_ratio_raw = support.get("support_ratio")
+    l2_ratio_raw = l2_protection.get("ratio")
+    recovery_rate = (
+        _coerce_float(recovery_rate_raw, 0.0, min_value=0.0, max_value=1.0)
+        if isinstance(recovery_rate_raw, (int, float))
+        else None
+    )
+    support_ratio = (
+        _coerce_float(support_ratio_raw, 0.0, min_value=0.0, max_value=1.0)
+        if isinstance(support_ratio_raw, (int, float))
+        else None
+    )
+    l2_ratio = (
+        _coerce_float(l2_ratio_raw, 0.0, min_value=0.0, max_value=1.0)
+        if isinstance(l2_ratio_raw, (int, float))
+        else None
+    )
+
+    repeated_skip = _coerce_int(deviation.get("repeated_skip"), 2, min_value=1, max_value=8)
+    l2_interruption = _coerce_int(deviation.get("l2_interruption"), 1, min_value=1, max_value=6)
+    stagnation_days = _coerce_int(deviation.get("stagnation_days"), 3, min_value=1, max_value=14)
+    l2_high = _coerce_float(l2.get("high"), 0.75, min_value=0.55, max_value=0.95)
+    l2_medium = _coerce_float(l2.get("medium"), 0.50, min_value=0.30, max_value=0.85)
+
+    reason_bits = []
+    target = {
+        "repeated_skip": repeated_skip,
+        "l2_interruption": l2_interruption,
+        "stagnation_days": stagnation_days,
+        "l2_high": l2_high,
+        "l2_medium": l2_medium,
+    }
+
+    if friction_score >= 0.67 or (support_ratio is not None and support_ratio < 0.4):
+        target["repeated_skip"] = repeated_skip + 1
+        target["l2_interruption"] = l2_interruption + 1
+        target["stagnation_days"] = stagnation_days + 1
+        reason_bits.append("high friction or override-heavy pattern, easing sensitivity")
+    elif (
+        friction_score <= 0.33
+        and recovery_rate is not None
+        and recovery_rate >= 0.75
+        and (support_ratio is None or support_ratio >= 0.6)
+    ):
+        target["repeated_skip"] = repeated_skip - 1
+        target["stagnation_days"] = stagnation_days - 1
+        reason_bits.append("stable follow-through, tightening sensitivity")
+
+    if l2_ratio is not None:
+        if l2_ratio >= l2_high + 0.1 and recovery_rate is not None and recovery_rate >= 0.7:
+            target["l2_high"] = l2_high + 0.05
+            target["l2_medium"] = l2_medium + 0.05
+            reason_bits.append("strong l2 protection, raising quality bar")
+        elif l2_ratio <= max(0.0, l2_medium - 0.1):
+            target["l2_high"] = l2_high - 0.05
+            target["l2_medium"] = l2_medium - 0.05
+            reason_bits.append("weak l2 protection, lowering pressure temporarily")
+
+    if target["l2_medium"] > target["l2_high"]:
+        target["l2_medium"] = target["l2_high"]
+
+    return {
+        "candidate": target,
+        "reason": "; ".join(reason_bits) if reason_bits else "metrics are stable",
+        "confidence": 0.62 if reason_bits else 0.5,
+        "source": "rules",
+    }
+
+
+def _llm_guardian_autotune_candidate(
+    *,
+    current_config: Dict[str, Any],
+    retrospective: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    llm = get_llm("strategic_brain")
+    if llm.get_model_name() == "rule_based":
+        return None
+
+    prompt_payload = {
+        "current_thresholds": (current_config.get("thresholds") or {}),
+        "humanization_metrics": retrospective.get("humanization_metrics", {}),
+        "l2_protection": retrospective.get("l2_protection", {}),
+        "deviation_signals": retrospective.get("deviation_signals", []),
+    }
+    prompt = (
+        "You are tuning guardian thresholds in shadow mode.\n"
+        "Return JSON only with this schema:\n"
+        "{\n"
+        '  "reason": "string",\n'
+        '  "confidence": 0.0,\n'
+        '  "candidate": {\n'
+        '    "repeated_skip": 0,\n'
+        '    "l2_interruption": 0,\n'
+        '    "stagnation_days": 0,\n'
+        '    "l2_high": 0.0,\n'
+        '    "l2_medium": 0.0\n'
+        "  }\n"
+        "}\n\n"
+        f"Context:\n{json.dumps(prompt_payload, ensure_ascii=False, indent=2)}"
+    )
+    try:
+        response = llm.generate(
+            prompt=prompt,
+            system_prompt="Return strict JSON only. Keep changes conservative.",
+            temperature=0.2,
+            max_tokens=300,
+        )
+    except Exception:
+        return None
+    if not response.success or not response.content:
+        return None
+    parsed = parse_llm_json(response.content)
+    if not isinstance(parsed, dict):
+        return None
+    candidate = parsed.get("candidate")
+    if not isinstance(candidate, dict):
+        return None
+    return {
+        "candidate": candidate,
+        "reason": str(parsed.get("reason") or "llm_proposal"),
+        "confidence": _coerce_float(parsed.get("confidence"), 0.0, min_value=0.0, max_value=1.0),
+        "source": "llm",
+    }
+
+
+def _sanitize_guardian_autotune_candidate(
+    *,
+    current_config: Dict[str, Any],
+    candidate: Dict[str, Any],
+    guardrails: Dict[str, Any],
+) -> Dict[str, Any]:
+    thresholds = current_config.get("thresholds") if isinstance(current_config, dict) else {}
+    thresholds = thresholds if isinstance(thresholds, dict) else {}
+    raw_deviation = thresholds.get("deviation_signals")
+    deviation = raw_deviation if isinstance(raw_deviation, dict) else {}
+    raw_l2 = thresholds.get("l2_protection")
+    l2 = raw_l2 if isinstance(raw_l2, dict) else {}
+    max_int_step = _coerce_int(guardrails.get("max_int_step"), 1, min_value=1, max_value=3)
+    max_float_step = _coerce_float(
+        guardrails.get("max_float_step"),
+        0.05,
+        min_value=0.01,
+        max_value=0.2,
+    )
+
+    sanitized = {
+        "repeated_skip": _clamp_step_int(
+            current=_coerce_int(deviation.get("repeated_skip"), 2, min_value=1, max_value=8),
+            target=candidate.get("repeated_skip"),
+            max_step=max_int_step,
+            min_value=1,
+            max_value=8,
+        ),
+        "l2_interruption": _clamp_step_int(
+            current=_coerce_int(deviation.get("l2_interruption"), 1, min_value=1, max_value=6),
+            target=candidate.get("l2_interruption"),
+            max_step=max_int_step,
+            min_value=1,
+            max_value=6,
+        ),
+        "stagnation_days": _clamp_step_int(
+            current=_coerce_int(deviation.get("stagnation_days"), 3, min_value=1, max_value=14),
+            target=candidate.get("stagnation_days"),
+            max_step=max_int_step,
+            min_value=1,
+            max_value=14,
+        ),
+        "l2_high": _clamp_step_float(
+            current=_coerce_float(l2.get("high"), 0.75, min_value=0.55, max_value=0.95),
+            target=candidate.get("l2_high"),
+            max_step=max_float_step,
+            min_value=0.55,
+            max_value=0.95,
+        ),
+        "l2_medium": _clamp_step_float(
+            current=_coerce_float(l2.get("medium"), 0.50, min_value=0.30, max_value=0.85),
+            target=candidate.get("l2_medium"),
+            max_step=max_float_step,
+            min_value=0.30,
+            max_value=0.85,
+        ),
+    }
+    if sanitized["l2_medium"] > sanitized["l2_high"]:
+        sanitized["l2_medium"] = sanitized["l2_high"]
+    return sanitized
+
+
+def _build_autotune_patch(
+    *,
+    current_config: Dict[str, Any],
+    sanitized_candidate: Dict[str, Any],
+) -> Dict[str, Any]:
+    thresholds = current_config.get("thresholds") if isinstance(current_config, dict) else {}
+    thresholds = thresholds if isinstance(thresholds, dict) else {}
+    raw_deviation = thresholds.get("deviation_signals")
+    deviation = raw_deviation if isinstance(raw_deviation, dict) else {}
+    raw_l2 = thresholds.get("l2_protection")
+    l2 = raw_l2 if isinstance(raw_l2, dict) else {}
+    current_flat = {
+        "repeated_skip": _coerce_int(
+            deviation.get("repeated_skip"),
+            2,
+            min_value=1,
+            max_value=8,
+        ),
+        "l2_interruption": _coerce_int(
+            deviation.get("l2_interruption"),
+            1,
+            min_value=1,
+            max_value=6,
+        ),
+        "stagnation_days": _coerce_int(
+            deviation.get("stagnation_days"),
+            3,
+            min_value=1,
+            max_value=14,
+        ),
+        "l2_high": round(
+            _coerce_float(l2.get("high"), 0.75, min_value=0.55, max_value=0.95),
+            2,
+        ),
+        "l2_medium": round(
+            _coerce_float(l2.get("medium"), 0.50, min_value=0.30, max_value=0.85),
+            2,
+        ),
+    }
+    patch = {}
+    for key, current_val in current_flat.items():
+        target_val = sanitized_candidate.get(key, current_val)
+        if target_val != current_val:
+            patch[key] = {"from": current_val, "to": target_val}
+    return patch
+
+
+def _run_guardian_autotune_shadow(trigger: str = "manual") -> Dict[str, Any]:
+    now = datetime.now()
+    raw = _load_blueprint_yaml()
+    config_payload = _normalized_guardian_autotune_config(raw)
+    if not config_payload.get("enabled"):
+        return {"status": "disabled", "mode": "shadow", "reason": "autotune_disabled"}
+    if config_payload.get("mode") != "shadow":
+        return {
+            "status": "skipped",
+            "mode": config_payload.get("mode"),
+            "reason": "unsupported_mode",
+        }
+
+    cooldown_hours = _coerce_int(
+        (config_payload.get("trigger") or {}).get("cooldown_hours"),
+        24,
+        min_value=1,
+        max_value=168,
+    )
+    latest = _load_latest_event("guardian_autotune_shadow_proposed")
+    latest_time = _parse_event_timestamp((latest or {}).get("timestamp"))
+    if latest_time and now - latest_time < timedelta(hours=cooldown_hours):
+        return {
+            "status": "skipped",
+            "mode": "shadow",
+            "reason": "cooldown_active",
+            "cooldown_hours": cooldown_hours,
+            "next_eligible_at": (latest_time + timedelta(hours=cooldown_hours)).isoformat(),
+        }
+
+    lookback_days = _coerce_int(
+        (config_payload.get("trigger") or {}).get("lookback_days"),
+        7,
+        min_value=1,
+        max_value=30,
+    )
+    min_event_count = _coerce_int(
+        (config_payload.get("trigger") or {}).get("min_event_count"),
+        20,
+        min_value=1,
+        max_value=9999,
+    )
+    events = _load_events_for_days(lookback_days)
+    if len(events) < min_event_count:
+        return {
+            "status": "skipped",
+            "mode": "shadow",
+            "reason": "insufficient_event_volume",
+            "event_count": len(events),
+            "required_event_count": min_event_count,
+        }
+
+    current_config = _normalized_guardian_config(raw)
+    retrospective = build_guardian_retrospective_response(days=lookback_days)
+    guardrails = (
+        config_payload.get("guardrails")
+        if isinstance(config_payload.get("guardrails"), dict)
+        else {}
+    )
+    deterministic = _deterministic_guardian_autotune_candidate(
+        current_config=current_config,
+        retrospective=retrospective,
+    )
+    selected = deterministic
+    if config_payload.get("llm_enabled"):
+        llm_candidate = _llm_guardian_autotune_candidate(
+            current_config=current_config,
+            retrospective=retrospective,
+        )
+        min_confidence = _coerce_float(
+            guardrails.get("min_confidence"),
+            0.55,
+            min_value=0.0,
+            max_value=1.0,
+        )
+        if llm_candidate and llm_candidate.get("confidence", 0.0) >= min_confidence:
+            selected = llm_candidate
+
+    sanitized_candidate = _sanitize_guardian_autotune_candidate(
+        current_config=current_config,
+        candidate=selected.get("candidate") if isinstance(selected.get("candidate"), dict) else {},
+        guardrails=guardrails,
+    )
+    patch = _build_autotune_patch(
+        current_config=current_config,
+        sanitized_candidate=sanitized_candidate,
+    )
+    if not patch:
+        return {
+            "status": "skipped",
+            "mode": "shadow",
+            "reason": "no_effective_delta",
+            "candidate_source": selected.get("source"),
+        }
+
+    proposal = {
+        "trigger": str(trigger or "manual"),
+        "lookback_days": lookback_days,
+        "event_count": len(events),
+        "candidate_source": selected.get("source"),
+        "confidence": round(
+            _coerce_float(selected.get("confidence"), 0.0, min_value=0.0, max_value=1.0),
+            2,
+        ),
+        "reason": str(selected.get("reason") or ""),
+        "patch": patch,
+        "proposed_thresholds": {
+            "deviation_signals": {
+                "repeated_skip": sanitized_candidate["repeated_skip"],
+                "l2_interruption": sanitized_candidate["l2_interruption"],
+                "stagnation_days": sanitized_candidate["stagnation_days"],
+            },
+            "l2_protection": {
+                "high": sanitized_candidate["l2_high"],
+                "medium": sanitized_candidate["l2_medium"],
+            },
+        },
+        "current_thresholds": current_config.get("thresholds", {}),
+    }
+    append_event(
+        {
+            "type": "guardian_autotune_shadow_proposed",
+            "timestamp": now.isoformat(),
+            "payload": proposal,
+        }
+    )
+    return {
+        "status": "proposed",
+        "mode": "shadow",
+        "proposal": proposal,
+    }
 
 
 def _has_review_due_this_week() -> bool:
@@ -478,6 +1123,12 @@ async def get_state():
                 "anchor.current",
                 "retrospective.alignment.trend",
                 "retrospective.l2_protection",
+                "retrospective.l2_session",
+                "retrospective.guardian_role",
+                "retrospective.intervention_policy",
+                "retrospective.humanization_metrics",
+                "retrospective.north_star_metrics",
+                "retrospective.blueprint_narrative",
             ],
             "decision_reason": {
                 "trigger": "State requested by API client",
@@ -490,9 +1141,46 @@ async def get_state():
     )
     retrospective = build_guardian_retrospective_response(days=7)
     guardian_state = system_state.get("guardian") or {}
+    guardian_autotune = _normalized_guardian_autotune_config(_load_blueprint_yaml())
     alignment_summary = service.summarize_alignment(registry.objectives + registry.goals)
     alignment_trend = (retrospective.get("alignment") or {}).get("trend", {})
     l2_protection = retrospective.get("l2_protection") or {}
+    l2_session = retrospective.get("l2_session") or {}
+    blueprint_narrative = retrospective.get("blueprint_narrative") or {}
+    humanization_metrics = retrospective.get("humanization_metrics") or {}
+    if not isinstance(humanization_metrics, dict):
+        humanization_metrics = {}
+    north_star_metrics = retrospective.get("north_star_metrics") or {}
+    if not isinstance(north_star_metrics, dict):
+        north_star_metrics = {}
+    recovery_metric = humanization_metrics.get("recovery_adoption_rate")
+    if not isinstance(recovery_metric, dict):
+        recovery_metric = {}
+    mundane_metric = (
+        north_star_metrics.get("mundane_automation_coverage")
+        if isinstance(north_star_metrics.get("mundane_automation_coverage"), dict)
+        else {}
+    )
+    trust_metric = (
+        north_star_metrics.get("human_trust_index")
+        if isinstance(north_star_metrics.get("human_trust_index"), dict)
+        else {}
+    )
+    l2_bloom_metric = (
+        north_star_metrics.get("l2_bloom_hours")
+        if isinstance(north_star_metrics.get("l2_bloom_hours"), dict)
+        else {}
+    )
+    alignment_delta_metric = (
+        north_star_metrics.get("alignment_delta_weekly")
+        if isinstance(north_star_metrics.get("alignment_delta_weekly"), dict)
+        else {}
+    )
+    north_star_targets = (
+        north_star_metrics.get("targets_met")
+        if isinstance(north_star_metrics.get("targets_met"), dict)
+        else {}
+    )
     guardian_authority = retrospective.get("authority") or {}
     guardian_escalation = (
         guardian_authority.get("escalation")
@@ -544,6 +1232,11 @@ async def get_state():
             "pending_confirmation": bool(retrospective.get("require_confirm")),
             "confirmation_action": retrospective.get("confirmation_action", {}),
             "response_action": retrospective.get("response_action", {}),
+            "guardian_role": retrospective.get("guardian_role", {}),
+            "policy": retrospective.get("intervention_policy", {}),
+            "blueprint_narrative": blueprint_narrative,
+            "explainability": retrospective.get("explainability", {}),
+            "autotune": guardian_autotune,
             "authority": guardian_authority,
             "escalation_stage": guardian_escalation.get("stage"),
             "safe_mode": guardian_safe_mode,
@@ -557,6 +1250,25 @@ async def get_state():
                 "l2_protection_summary": l2_protection.get("summary"),
                 "l2_protection_trend": l2_protection.get("trend", []),
                 "l2_protection_thresholds": l2_protection.get("thresholds", {}),
+                "recovery_adoption_rate": recovery_metric.get("rate"),
+                "friction_load": humanization_metrics.get("friction_load", {}),
+                "support_vs_override": humanization_metrics.get(
+                    "support_vs_override",
+                    {},
+                ),
+                "north_star": north_star_metrics,
+                "mundane_automation_coverage": mundane_metric.get("rate"),
+                "l2_bloom_hours": l2_bloom_metric.get("hours"),
+                "human_trust_index": trust_metric.get("score"),
+                "alignment_delta_weekly": alignment_delta_metric.get("delta"),
+                "north_star_targets_met": north_star_targets,
+                "humanization": humanization_metrics,
+                "l2_session": l2_session,
+                "l2_completion_rate": l2_session.get("completion_rate"),
+                "l2_recovery_rate": l2_session.get("recovery_rate"),
+                "l2_resume_ready": l2_session.get("resume_ready"),
+                "l2_resume_session_id": l2_session.get("resume_session_id"),
+                "l2_micro_ritual": l2_session.get("micro_ritual", {}),
             },
         },
         "audit": state_audit,
@@ -580,6 +1292,68 @@ def _normalize_guardian_response_action(raw_action: Optional[str]) -> str:
             detail="action must be one of confirm | snooze | dismiss",
         )
     return action
+
+
+def _normalize_guardian_response_context(raw_context: Optional[str]) -> Optional[str]:
+    context = str(raw_context or "").strip().lower()
+    if not context:
+        return None
+    if context not in ALLOWED_GUARDIAN_RESPONSE_CONTEXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "context must be one of recovering | resource_blocked | "
+                "task_too_big | instinct_escape"
+            ),
+        )
+    return context
+
+
+def _guardian_recovery_step(
+    *,
+    action: str,
+    context: Optional[str],
+    suggestion: str,
+) -> Optional[str]:
+    normalized = str(context or "recovering").strip().lower()
+    if action not in {"snooze", "dismiss"}:
+        return None
+    if normalized == "resource_blocked":
+        return "先清理一个阻塞点（资源/信息/依赖），再回到主任务。"
+    if normalized == "task_too_big":
+        return "把当前任务拆成 10-20 分钟最小下一步，并仅执行第一步。"
+    if normalized == "instinct_escape":
+        return "先移除一个干扰源，然后进行 10 分钟保底执行。"
+    if suggestion:
+        return f"稍后重启建议：{suggestion}"
+    return "先恢复状态，再完成一个 10 分钟最小动作。"
+
+
+def _normalize_l2_interrupt_reason(raw_reason: Optional[str]) -> str:
+    reason = str(raw_reason or "other").strip().lower()
+    if reason not in ALLOWED_L2_SESSION_INTERRUPT_REASONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "reason must be one of context_switch | external_interrupt | "
+                "energy_drop | tooling_blocked | other"
+            ),
+        )
+    return reason
+
+
+def _resolve_active_l2_session_id() -> Optional[str]:
+    payload = build_guardian_retrospective_response(days=7)
+    l2_session = payload.get("l2_session") if isinstance(payload.get("l2_session"), dict) else {}
+    active_session_id = l2_session.get("active_session_id")
+    return str(active_session_id) if active_session_id else None
+
+
+def _resolve_resumable_l2_session_id() -> Optional[str]:
+    payload = build_guardian_retrospective_response(days=7)
+    l2_session = payload.get("l2_session") if isinstance(payload.get("l2_session"), dict) else {}
+    resume_session_id = l2_session.get("resume_session_id")
+    return str(resume_session_id) if resume_session_id else None
 
 
 def _maybe_append_safe_mode_transition(
@@ -652,6 +1426,7 @@ def _apply_guardian_intervention_response(
 ) -> Dict[str, Any]:
     days = request.days or 7
     action = _normalize_guardian_response_action(request.action)
+    context = _normalize_guardian_response_context(request.context)
     current_payload = build_guardian_retrospective_response(days)
     confirmation_action = (
         current_payload.get("confirmation_action")
@@ -694,9 +1469,24 @@ def _apply_guardian_intervention_response(
     if isinstance(latest, dict):
         latest_action = str(latest.get("action", "")).lower()
         latest_fingerprint = latest.get("fingerprint")
-        if latest_action == action and latest_fingerprint == current_fingerprint:
+        latest_context = str(latest.get("context", "") or "").strip().lower() or None
+        if (
+            latest_action == action
+            and latest_fingerprint == current_fingerprint
+            and latest_context == context
+        ):
             return {"status": "already_responded", "retrospective": current_payload}
 
+    guardian_role = (
+        current_payload.get("guardian_role")
+        if isinstance(current_payload.get("guardian_role"), dict)
+        else {}
+    )
+    recovery_step = _guardian_recovery_step(
+        action=action,
+        context=context,
+        suggestion=str(current_payload.get("suggestion", "") or ""),
+    )
     base_payload = {
         "days": days,
         "fingerprint": current_fingerprint,
@@ -707,7 +1497,12 @@ def _apply_guardian_intervention_response(
             if isinstance(source, dict)
         ],
         "note": request.note or "",
+        "context": context,
+        "representing": guardian_role.get("representing"),
+        "facing": guardian_role.get("facing"),
     }
+    if recovery_step:
+        base_payload["recovery_step"] = recovery_step
 
     if action == "confirm":
         append_event(
@@ -740,6 +1535,7 @@ def _apply_guardian_intervention_response(
     return {
         "status": status,
         "action": action,
+        "recovery_step": recovery_step,
         "safe_mode_transition": safe_mode_transition,
         "retrospective": updated_payload,
     }
@@ -758,9 +1554,109 @@ async def confirm_retrospective_intervention(request: RetrospectiveConfirmReques
             fingerprint=request.fingerprint,
             action="confirm",
             note=request.note,
+            context=request.context,
         ),
         strict_confirm_required=True,
     )
+
+
+@router.post("/l2/session/start")
+async def start_l2_session(request: L2SessionActionRequest):
+    session_id = request.session_id or f"l2_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    intention = str(request.intention or "").strip()
+    append_event(
+        {
+            "type": "l2_session_started",
+            "timestamp": datetime.now().isoformat(),
+            "payload": {
+                "session_id": session_id,
+                "source": "manual",
+                "intention": intention,
+                "note": request.note or "",
+            },
+        }
+    )
+    return {
+        "status": "started",
+        "session_id": session_id,
+        "retrospective": build_guardian_retrospective_response(days=7),
+    }
+
+
+@router.post("/l2/session/resume")
+async def resume_l2_session(request: L2SessionActionRequest):
+    session_id = request.session_id or _resolve_resumable_l2_session_id()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="No interrupted L2 session to resume")
+    resume_step = str(request.resume_step or "").strip()
+    append_event(
+        {
+            "type": "l2_session_resumed",
+            "timestamp": datetime.now().isoformat(),
+            "payload": {
+                "session_id": session_id,
+                "source": "manual",
+                "resume_step": resume_step,
+                "note": request.note or "",
+            },
+        }
+    )
+    return {
+        "status": "resumed",
+        "session_id": session_id,
+        "retrospective": build_guardian_retrospective_response(days=7),
+    }
+
+
+@router.post("/l2/session/interrupt")
+async def interrupt_l2_session(request: L2SessionActionRequest):
+    session_id = request.session_id or _resolve_active_l2_session_id()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="No active L2 session to interrupt")
+    reason = _normalize_l2_interrupt_reason(request.reason)
+    append_event(
+        {
+            "type": "l2_session_interrupted",
+            "timestamp": datetime.now().isoformat(),
+            "payload": {
+                "session_id": session_id,
+                "reason": reason,
+                "source": "manual",
+                "note": request.note or "",
+            },
+        }
+    )
+    return {
+        "status": "interrupted",
+        "session_id": session_id,
+        "reason": reason,
+        "retrospective": build_guardian_retrospective_response(days=7),
+    }
+
+
+@router.post("/l2/session/complete")
+async def complete_l2_session(request: L2SessionActionRequest):
+    session_id = request.session_id or _resolve_active_l2_session_id()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="No active L2 session to complete")
+    reflection = str(request.reflection or "").strip()
+    append_event(
+        {
+            "type": "l2_session_completed",
+            "timestamp": datetime.now().isoformat(),
+            "payload": {
+                "session_id": session_id,
+                "source": "manual",
+                "reflection": reflection,
+                "note": request.note or "",
+            },
+        }
+    )
+    return {
+        "status": "completed",
+        "session_id": session_id,
+        "retrospective": build_guardian_retrospective_response(days=7),
+    }
 
 
 @router.get("/guardian/config")
@@ -872,6 +1768,74 @@ async def update_guardian_config(request: GuardianConfigUpdateRequest):
         "source_path": str(BLUEPRINT_CONFIG_PATH),
         "config": payload,
     }
+
+
+@router.get("/guardian/autotune/config")
+async def get_guardian_autotune_config():
+    config_payload = _normalized_guardian_autotune_config(_load_blueprint_yaml())
+    return {
+        "source_path": str(BLUEPRINT_CONFIG_PATH),
+        "config": config_payload,
+    }
+
+
+@router.put("/guardian/autotune/config")
+async def update_guardian_autotune_config(request: GuardianAutoTuneConfigUpdateRequest):
+    mode = str(request.mode or "shadow").strip().lower()
+    if mode not in ALLOWED_GUARDIAN_AUTOTUNE_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail="mode must be 'shadow'",
+        )
+    payload = {
+        "enabled": bool(request.enabled),
+        "mode": mode,
+        "llm_enabled": bool(request.llm_enabled),
+        "trigger": {
+            "lookback_days": _coerce_int(request.trigger.lookback_days, 7, 1, 30),
+            "min_event_count": _coerce_int(request.trigger.min_event_count, 20, 1, 9999),
+            "cooldown_hours": _coerce_int(request.trigger.cooldown_hours, 24, 1, 168),
+        },
+        "guardrails": {
+            "max_int_step": _coerce_int(request.guardrails.max_int_step, 1, 1, 3),
+            "max_float_step": round(
+                _coerce_float(request.guardrails.max_float_step, 0.05, 0.01, 0.2),
+                2,
+            ),
+            "min_confidence": round(
+                _coerce_float(request.guardrails.min_confidence, 0.55, 0.0, 1.0),
+                2,
+            ),
+        },
+    }
+    _save_guardian_autotune_config(payload)
+    append_event(
+        {
+            "type": "guardian_autotune_config_updated",
+            "timestamp": datetime.now().isoformat(),
+            "payload": payload,
+        }
+    )
+    return {
+        "status": "updated",
+        "source_path": str(BLUEPRINT_CONFIG_PATH),
+        "config": payload,
+    }
+
+
+@router.get("/guardian/autotune/shadow/latest")
+async def get_guardian_autotune_shadow_latest():
+    latest = _load_latest_event("guardian_autotune_shadow_proposed")
+    return {
+        "config": _normalized_guardian_autotune_config(_load_blueprint_yaml()),
+        "latest": latest,
+    }
+
+
+@router.post("/guardian/autotune/shadow/run")
+async def run_guardian_autotune_shadow(request: Optional[GuardianAutoTuneRunRequest] = None):
+    trigger = request.trigger if isinstance(request, GuardianAutoTuneRunRequest) else "manual"
+    return _run_guardian_autotune_shadow(trigger=trigger)
 
 
 @router.get("/anchor/current")
@@ -1165,6 +2129,10 @@ async def stream_events():
 async def trigger_cycle():
     steward = get_steward()
     plan = steward.run_planning_cycle()
+    try:
+        autotune_result = _run_guardian_autotune_shadow(trigger="cycle")
+    except Exception as exc:
+        autotune_result = {"status": "error", "mode": "shadow", "reason": str(exc)}
     audit = _normalized_audit(
         raw_audit=plan.get("audit", {}),
         default_strategy="planning_cycle",
@@ -1176,6 +2144,7 @@ async def trigger_cycle():
         "status": "cycled",
         "generated_actions": plan.get("actions", []),
         "executed_auto_tasks": plan.get("executed_auto_tasks", []),
+        "guardian_autotune": autotune_result,
         "audit": audit,
     }
 

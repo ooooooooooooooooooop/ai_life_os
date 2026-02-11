@@ -77,8 +77,10 @@ export default function Home() {
 
     const [skipDialogOpen, setSkipDialogOpen] = useState(false);
     const [skipReason, setSkipReason] = useState('');
+    const [skipContext, setSkipContext] = useState('recovering');
     const [deleteTargetGoalId, setDeleteTargetGoalId] = useState(null);
     const [guardianResponseLoading, setGuardianResponseLoading] = useState(false);
+    const [guardianResponseContext, setGuardianResponseContext] = useState('recovering');
     const [anchorDiff, setAnchorDiff] = useState(null);
     const [anchorDiffLoading, setAnchorDiffLoading] = useState(false);
     const [activateAnchorLoading, setActivateAnchorLoading] = useState(false);
@@ -88,6 +90,12 @@ export default function Home() {
     const [guardianConfigSaving, setGuardianConfigSaving] = useState(false);
     const [guardianConfigDirty, setGuardianConfigDirty] = useState(false);
     const [guardianConfigSavedAt, setGuardianConfigSavedAt] = useState(null);
+    const [l2SessionActionLoading, setL2SessionActionLoading] = useState(false);
+    const [l2InterruptReason, setL2InterruptReason] = useState('context_switch');
+    const [l2StartIntention, setL2StartIntention] = useState('');
+    const [l2ResumeStep, setL2ResumeStep] = useState('');
+    const [l2CompletionReflection, setL2CompletionReflection] = useState('');
+    const [recoveryBatchLoading, setRecoveryBatchLoading] = useState(false);
 
     const signalNameMap = {
         repeated_skip: '重复跳过',
@@ -99,6 +107,37 @@ export default function Home() {
         firm_reminder: '坚定提醒',
         periodic_check: '周期检查'
     };
+    const responseContextLabelMap = {
+        recovering: '恢复精力',
+        resource_blocked: '资源受阻',
+        task_too_big: '任务过大',
+        instinct_escape: '本能逃避'
+    };
+    const responseContextHintMap = {
+        recovering: '先恢复状态，再继续推进。',
+        resource_blocked: '当前被资源或外部条件卡住。',
+        task_too_big: '先拆成最小下一步，降低启动阻力。',
+        instinct_escape: '正在被即时满足牵引，偏离长期价值。'
+    };
+    const l2InterruptReasonLabelMap = {
+        context_switch: '上下文切换',
+        external_interrupt: '外部打断',
+        energy_drop: '精力下滑',
+        tooling_blocked: '工具阻塞',
+        other: '其他'
+    };
+    const supportModeLabelMap = {
+        support_heavy: '支持优先',
+        balanced: '支持/覆盖平衡',
+        override_heavy: '覆盖优先',
+        insufficient_data: '数据不足'
+    };
+    const responseContextOptions = [
+        { value: 'recovering', label: '恢复精力' },
+        { value: 'resource_blocked', label: '资源受阻' },
+        { value: 'task_too_big', label: '任务过大' },
+        { value: 'instinct_escape', label: '本能逃避' }
+    ];
 
     const severityStyleMap = {
         high: { background: 'rgba(239, 68, 68, 0.2)', color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.4)' },
@@ -122,6 +161,42 @@ export default function Home() {
     useEffect(() => {
         fetchAll();
     }, []);
+
+    useEffect(() => {
+        const latestContext = retrospective?.response_action?.latest?.context;
+        if (latestContext) {
+            setGuardianResponseContext(latestContext);
+            return;
+        }
+        const defaultContext = retrospective?.response_action?.default_context;
+        if (defaultContext) {
+            setGuardianResponseContext(defaultContext);
+        }
+    }, [retrospective?.response_action?.fingerprint]);
+
+    useEffect(() => {
+        const options = retrospective?.l2_session_action?.interrupt?.reason_options || [];
+        if (!Array.isArray(options) || options.length === 0) return;
+        const allowed = new Set(options.map((opt) => opt?.value).filter(Boolean));
+        if (!allowed.has(l2InterruptReason)) {
+            setL2InterruptReason(options[0]?.value || 'context_switch');
+        }
+    }, [retrospective?.l2_session_action?.active_session_id]);
+
+    useEffect(() => {
+        const minimalStep = retrospective?.l2_session_action?.resume?.minimal_step
+            || retrospective?.l2_session?.resume_hint
+            || '';
+        if (minimalStep) {
+            setL2ResumeStep(minimalStep);
+        } else if (!retrospective?.l2_session?.resume_ready) {
+            setL2ResumeStep('');
+        }
+    }, [
+        retrospective?.l2_session_action?.resume?.session_id,
+        retrospective?.l2_session?.resume_ready,
+        retrospective?.l2_session?.resume_hint
+    ]);
 
     const fetchAll = async () => {
         try {
@@ -212,6 +287,7 @@ export default function Home() {
     const openSkipDialog = () => {
         if (!currentTask || actionLoading) return;
         setSkipReason('');
+        setSkipContext('recovering');
         setSkipDialogOpen(true);
     };
 
@@ -224,9 +300,13 @@ export default function Home() {
         try {
             setActionLoading(true);
             setError(null);
-            await api.post(`/tasks/${currentTask.id}/skip`, { reason: skipReason.trim() });
+            await api.post(`/tasks/${currentTask.id}/skip`, {
+                reason: skipReason.trim(),
+                context: skipContext
+            });
             setSkipDialogOpen(false);
             setSkipReason('');
+            setSkipContext('recovering');
             await fetchAll();
         } catch (e) {
             console.error(e);
@@ -270,7 +350,8 @@ export default function Home() {
                     retrospective.response_action?.fingerprint
                     ?? retrospective.confirmation_action?.fingerprint
                     ?? null,
-                action
+                action,
+                context: guardianResponseContext
             });
             await fetchAll();
         } catch (e) {
@@ -283,6 +364,80 @@ export default function Home() {
 
     const handleConfirmIntervention = async () => {
         await handleGuardianResponse('confirm');
+    };
+
+    const handleApplyRecoveryBatch = async () => {
+        if (recoveryBatchLoading) return;
+        try {
+            setRecoveryBatchLoading(true);
+            setError(null);
+            await api.post('/tasks/recovery/batch/apply');
+            await fetchAll();
+        } catch (e) {
+            console.error(e);
+            setError('应用恢复批处理失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setRecoveryBatchLoading(false);
+        }
+    };
+
+    const handleL2SessionAction = async (action) => {
+        if (l2SessionActionLoading) return;
+        const actionSpec = retrospective?.l2_session_action || {};
+        const activeSessionId = retrospective?.l2_session?.active_session_id || null;
+        const resumeSessionId = retrospective?.l2_session?.resume_session_id
+            || actionSpec?.resume?.session_id
+            || null;
+        const endpointMap = {
+            start: actionSpec.start?.endpoint || '/l2/session/start',
+            resume: actionSpec.resume?.endpoint || '/l2/session/resume',
+            interrupt: actionSpec.interrupt?.endpoint || '/l2/session/interrupt',
+            complete: actionSpec.complete?.endpoint || '/l2/session/complete'
+        };
+        const endpoint = endpointMap[action];
+        if (!endpoint) return;
+
+        const payload = {};
+        if (action !== 'start' && action !== 'resume' && activeSessionId) {
+            payload.session_id = activeSessionId;
+        }
+        if (action === 'resume' && resumeSessionId) {
+            payload.session_id = resumeSessionId;
+        }
+        if (action === 'interrupt') {
+            payload.reason = l2InterruptReason;
+        }
+        if (action === 'start') {
+            const intention = (l2StartIntention || '').trim();
+            if (intention) payload.intention = intention;
+        }
+        if (action === 'resume') {
+            const step = (l2ResumeStep || '').trim();
+            if (step) payload.resume_step = step;
+        }
+        if (action === 'complete') {
+            const reflection = (l2CompletionReflection || '').trim();
+            if (reflection) payload.reflection = reflection;
+        }
+
+        try {
+            setL2SessionActionLoading(true);
+            setError(null);
+            await api.post(endpoint, payload);
+            if (action === 'start') {
+                setL2StartIntention('');
+            } else if (action === 'resume') {
+                setL2ResumeStep('');
+            } else if (action === 'complete') {
+                setL2CompletionReflection('');
+            }
+            await fetchAll();
+        } catch (e) {
+            console.error(e);
+            setError('更新 L2 会话失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setL2SessionActionLoading(false);
+        }
     };
 
     const handleCheckAnchorDiff = async () => {
@@ -451,9 +606,142 @@ export default function Home() {
     const guardianEscalationStage = guardianEscalation?.stage || 'gentle_nudge';
     const guardianEscalationLabel = escalationStageMap[guardianEscalationStage] || guardianEscalationStage;
     const guardianLatestResponse = retrospective?.response_action?.latest || null;
+    const guardianLatestRecoveryStep = guardianLatestResponse?.recovery_step || null;
+    const guardianRole = retrospective?.guardian_role || {};
+    const guardianRoleRepresentingLabel = guardianRole?.representing_label || '价值自我';
+    const guardianRoleFacingLabel = guardianRole?.facing_label || '本能自我';
+    const guardianRoleMessage = guardianRole?.message || '系统正在代表价值自我，守护长期目标。';
+    const guardianLatestResponseContextLabel = guardianLatestResponse?.context_label
+        || responseContextLabelMap[guardianLatestResponse?.context]
+        || guardianLatestResponse?.context
+        || '--';
+    const humanizationMetrics = retrospective?.humanization_metrics || {};
+    const recoveryAdoptionMetric = humanizationMetrics?.recovery_adoption_rate || {};
+    const recoveryAdoptionRate = Number(recoveryAdoptionMetric?.rate);
+    const recoveryAdoptionLabel = Number.isFinite(recoveryAdoptionRate)
+        ? `${Math.round(recoveryAdoptionRate * 100)}%`
+        : '--';
+    const frictionLoadMetric = humanizationMetrics?.friction_load || {};
+    const frictionLoadScore = Number(frictionLoadMetric?.score);
+    const frictionLoadLabel = Number.isFinite(frictionLoadScore)
+        ? `${Math.round(frictionLoadScore * 100)}%`
+        : '--';
+    const frictionLoadLevel = frictionLoadMetric?.level || 'unknown';
+    const frictionLoadColorMap = {
+        high: '#fca5a5',
+        medium: '#fcd34d',
+        low: '#86efac',
+        unknown: '#cbd5e1'
+    };
+    const supportVsOverrideMetric = humanizationMetrics?.support_vs_override || {};
+    const supportVsOverrideRatio = Number(supportVsOverrideMetric?.support_ratio);
+    const supportVsOverrideLabel = Number.isFinite(supportVsOverrideRatio)
+        ? `${Math.round(supportVsOverrideRatio * 100)}%`
+        : '--';
+    const supportVsOverrideMode = supportVsOverrideMetric?.mode || 'insufficient_data';
+    const supportVsOverrideModeLabel = supportModeLabelMap[supportVsOverrideMode] || supportVsOverrideMode;
+    const interventionPolicy = retrospective?.intervention_policy || {};
+    const interventionPolicyModeMap = {
+        support_recovery: '支持恢复',
+        focused_override: '坚定纠偏',
+        low_frequency_observe: '低频观察',
+        balanced_intervention: '平衡干预'
+    };
+    const interventionPolicyMode = interventionPolicy?.mode || 'balanced_intervention';
+    const interventionPolicyLabel = interventionPolicyModeMap[interventionPolicyMode] || interventionPolicyMode;
+    const interventionFrictionBudget = interventionPolicy?.friction_budget || {};
+    const reminderWindowLabel = interventionFrictionBudget?.window_hours
+        ? `${interventionFrictionBudget.recent_prompt_count ?? 0}/${interventionFrictionBudget.max_prompts ?? '--'} (${interventionFrictionBudget.window_hours}h)`
+        : '--';
+    const interventionSuppressed = Boolean(interventionFrictionBudget?.suppressed);
+    const interventionCooldownLabel = interventionFrictionBudget?.cooldown_active
+        ? `${interventionFrictionBudget.cooldown_remaining_minutes ?? 0} 分钟`
+        : '无';
+    const northStarMetrics = retrospective?.north_star_metrics || {};
+    const northStarTargets = northStarMetrics?.targets_met || {};
+    const mundaneCoverageMetric = northStarMetrics?.mundane_automation_coverage || {};
+    const mundaneCoverageRate = Number(mundaneCoverageMetric?.rate);
+    const mundaneCoverageLabel = Number.isFinite(mundaneCoverageRate)
+        ? `${Math.round(mundaneCoverageRate * 100)}%`
+        : '--';
+    const l2BloomMetric = northStarMetrics?.l2_bloom_hours || {};
+    const l2BloomHours = Number(l2BloomMetric?.hours);
+    const l2BloomBaseline = Number(l2BloomMetric?.baseline_hours);
+    const l2BloomDeltaRatio = Number(l2BloomMetric?.delta_ratio);
+    const l2BloomHoursLabel = Number.isFinite(l2BloomHours) ? `${l2BloomHours.toFixed(1)}h` : '--';
+    const l2BloomDeltaLabel = Number.isFinite(l2BloomDeltaRatio)
+        ? `${l2BloomDeltaRatio >= 0 ? '+' : ''}${Math.round(l2BloomDeltaRatio * 100)}%`
+        : '--';
+    const humanTrustMetric = northStarMetrics?.human_trust_index || {};
+    const humanTrustScore = Number(humanTrustMetric?.score);
+    const humanTrustLabel = Number.isFinite(humanTrustScore)
+        ? `${Math.round(humanTrustScore * 100)}%`
+        : '--';
+    const alignmentDeltaMetric = northStarMetrics?.alignment_delta_weekly || {};
+    const alignmentDeltaValue = Number(alignmentDeltaMetric?.delta);
+    const alignmentDeltaLabel = Number.isFinite(alignmentDeltaValue)
+        ? `${alignmentDeltaValue >= 0 ? '+' : ''}${alignmentDeltaValue.toFixed(1)}`
+        : '--';
+    const northStarMetCount = Number(northStarTargets?.met_count);
+    const northStarTotal = Number(northStarTargets?.total);
+    const northStarSummaryLabel = Number.isFinite(northStarMetCount) && Number.isFinite(northStarTotal) && northStarTotal > 0
+        ? `${northStarMetCount}/${northStarTotal} 达标`
+        : '暂无达标统计';
+    const metricStatusLabel = (flag) => {
+        if (flag === true) return '达标';
+        if (flag === false) return '未达标';
+        return '待评估';
+    };
+    const explainability = retrospective?.explainability || {};
+    const guardianExplainWhy = explainability?.why_this_suggestion
+        || retrospective?.suggestion
+        || '暂无解释';
+    const guardianExplainNext = explainability?.what_happens_next
+        || '系统将继续观察并在下一轮复盘更新建议。';
+    const guardianExplainSignals = Array.isArray(explainability?.active_signals)
+        ? explainability.active_signals
+        : [];
+    const l2Session = retrospective?.l2_session || {};
+    const l2SessionAction = retrospective?.l2_session_action || {};
+    const l2SessionActive = Boolean(l2Session?.active_session);
+    const l2SessionActiveId = l2Session?.active_session_id || null;
+    const l2SessionResumeReady = Boolean(l2Session?.resume_ready);
+    const l2SessionResumeId = l2Session?.resume_session_id || l2SessionAction?.resume?.session_id || null;
+    const l2SessionResumeHint = l2SessionAction?.resume?.minimal_step || l2Session?.resume_hint || '';
+    const l2SessionCompletionRate = Number(l2Session?.completion_rate);
+    const l2SessionCompletionLabel = Number.isFinite(l2SessionCompletionRate)
+        ? `${Math.round(l2SessionCompletionRate * 100)}%`
+        : '--';
+    const l2SessionRecoveryRate = Number(l2Session?.recovery_rate);
+    const l2SessionRecoveryLabel = Number.isFinite(l2SessionRecoveryRate)
+        ? `${Math.round(l2SessionRecoveryRate * 100)}%`
+        : '--';
+    const l2MicroRitual = l2Session?.micro_ritual || {};
+    const l2StartIntentionRate = Number(l2MicroRitual?.start_intention_rate);
+    const l2StartIntentionRateLabel = Number.isFinite(l2StartIntentionRate)
+        ? `${Math.round(l2StartIntentionRate * 100)}%`
+        : '--';
+    const l2CompletionReflectionRate = Number(l2MicroRitual?.completion_reflection_rate);
+    const l2CompletionReflectionRateLabel = Number.isFinite(l2CompletionReflectionRate)
+        ? `${Math.round(l2CompletionReflectionRate * 100)}%`
+        : '--';
+    const l2SessionRecentEvents = (l2Session?.recent_events || []).slice(-3).reverse();
+    const l2InterruptReasonOptions = l2SessionAction?.interrupt?.reason_options?.length > 0
+        ? l2SessionAction.interrupt.reason_options
+        : [
+            { value: 'context_switch', label: '上下文切换' },
+            { value: 'external_interrupt', label: '外部打断' },
+            { value: 'energy_drop', label: '精力下滑' },
+            { value: 'tooling_blocked', label: '工具阻塞' },
+            { value: 'other', label: '其他' }
+        ];
     const guardianThresholds = guardianConfig?.thresholds || {};
     const deviationCfg = guardianThresholds.deviation_signals || {};
     const l2Cfg = guardianThresholds.l2_protection || {};
+    const blueprintNarrative = retrospective?.blueprint_narrative || {};
+    const blueprintDimensions = blueprintNarrative?.dimensions || {};
+    const blueprintNarrativeCard = blueprintNarrative?.narrative_card || {};
+    const pendingRecoveryCount = (tasks.pending || []).filter((task) => String(task?.id || '').endsWith('_recovery')).length;
 
     if (loading) {
         return (
@@ -763,6 +1051,19 @@ export default function Home() {
                     <h4 style={{ color: 'var(--accent-color)', marginBottom: '0.75rem', fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: '1px' }}>
                         当前任务
                     </h4>
+                    {pendingRecoveryCount > 0 && (
+                        <div style={{ marginBottom: '0.6rem', display: 'flex', justifyContent: 'flex-end' }}>
+                            <button
+                                type="button"
+                                className="btn btn-secondary"
+                                onClick={handleApplyRecoveryBatch}
+                                disabled={recoveryBatchLoading || actionLoading}
+                                style={{ fontSize: '0.76rem', padding: '0.28rem 0.7rem' }}
+                            >
+                                {recoveryBatchLoading ? '应用中...' : `一键应用恢复批处理 (${pendingRecoveryCount})`}
+                            </button>
+                        </div>
+                    )}
                     {!currentTask ? (
                         <div className="glass-card" style={{ padding: '1rem' }}>
                             今日暂无待办任务。
@@ -817,6 +1118,35 @@ export default function Home() {
                                 窗口 {guardianEscalation.window_days ?? 7} 天 · 抵抗 {guardianEscalation.resistance_count ?? 0}
                                 / 响应 {guardianEscalation.response_count ?? 0}
                             </div>
+                        </div>
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: interventionSuppressed
+                                    ? '1px solid rgba(245, 158, 11, 0.45)'
+                                    : '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: interventionSuppressed
+                                    ? 'rgba(245, 158, 11, 0.1)'
+                                    : 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>干预节奏策略</div>
+                                <div style={{ fontSize: '0.86rem', fontWeight: 600 }}>{interventionPolicyLabel}</div>
+                            </div>
+                            <div style={{ marginTop: '0.25rem', fontSize: '0.73rem', color: 'var(--text-secondary)' }}>
+                                原因: {interventionPolicy?.reason || '暂无策略说明'}
+                            </div>
+                            <div style={{ marginTop: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                提醒预算: {reminderWindowLabel} · 冷却: {interventionCooldownLabel}
+                            </div>
+                            {interventionSuppressed && (
+                                <div style={{ marginTop: '0.2rem', fontSize: '0.72rem', color: '#fcd34d' }}>
+                                    当前轮次触发了摩擦预算，建议已暂缓展示。
+                                </div>
+                            )}
                         </div>
                         {guardianSafeMode.enabled && (
                             <div
@@ -920,6 +1250,349 @@ export default function Home() {
                                     })}
                                 </div>
                             )}
+                        </div>
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>人性化指标</div>
+                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    恢复采纳 · 摩擦负荷 · 支持/覆盖
+                                </div>
+                            </div>
+                            <div style={{ marginTop: '0.5rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.5rem' }}>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>恢复采纳率</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{recoveryAdoptionLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        {recoveryAdoptionMetric?.adopted ?? 0}/{recoveryAdoptionMetric?.suggested ?? 0} 已采纳
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {recoveryAdoptionMetric?.summary || '暂无恢复建议数据'}
+                                    </div>
+                                </div>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>摩擦负荷</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700, color: frictionLoadColorMap[frictionLoadLevel] || frictionLoadColorMap.unknown }}>
+                                        {frictionLoadLabel}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        级别: {frictionLoadLevel}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {frictionLoadMetric?.summary || '暂无摩擦负荷数据'}
+                                    </div>
+                                </div>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>支持/覆盖比</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{supportVsOverrideLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        {supportVsOverrideModeLabel} · 支持 {supportVsOverrideMetric?.support_count ?? 0} / 覆盖 {supportVsOverrideMetric?.override_count ?? 0}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {supportVsOverrideMetric?.summary || '暂无支持/覆盖数据'}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>North-Star 指标</div>
+                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>{northStarSummaryLabel}</div>
+                            </div>
+                            <div style={{ marginTop: '0.5rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.5rem' }}>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>L1 自动化覆盖率</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{mundaneCoverageLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        机会 {mundaneCoverageMetric?.l1_recovery_opportunities ?? 0} · 采纳 {mundaneCoverageMetric?.adopted_auto_recovery ?? 0}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {metricStatusLabel(mundaneCoverageMetric?.met_target)}
+                                    </div>
+                                </div>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>L2 Bloom 时长</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{l2BloomHoursLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        基线 {Number.isFinite(l2BloomBaseline) ? `${l2BloomBaseline.toFixed(1)}h` : '--'} · 变化 {l2BloomDeltaLabel}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {metricStatusLabel(l2BloomMetric?.met_target)}
+                                    </div>
+                                </div>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>Human Trust Index</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{humanTrustLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        支持 {Number.isFinite(Number(humanTrustMetric?.components?.support_ratio)) ? `${Math.round(Number(humanTrustMetric?.components?.support_ratio) * 100)}%` : '--'} · 采纳 {Number.isFinite(Number(humanTrustMetric?.components?.adoption_rate)) ? `${Math.round(Number(humanTrustMetric?.components?.adoption_rate) * 100)}%` : '--'}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {metricStatusLabel(humanTrustMetric?.met_target)}
+                                    </div>
+                                </div>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>周对齐增量</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{alignmentDeltaLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        本周 {alignmentDeltaMetric?.current_week_avg ?? '--'} · 上周 {alignmentDeltaMetric?.previous_week_avg ?? '--'}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {metricStatusLabel(alignmentDeltaMetric?.met_target)}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>L2 会话状态</div>
+                                <div style={{ fontSize: '0.84rem', fontWeight: 600 }}>
+                                    {l2SessionActive ? `进行中 · ${l2SessionActiveId || '--'}` : '未进行'}
+                                </div>
+                            </div>
+                            <div style={{ marginTop: '0.22rem', fontSize: '0.73rem', color: 'var(--text-secondary)' }}>
+                                启动 {l2Session.started ?? 0} · 完成 {l2Session.completed ?? 0}
+                                · 中断 {l2Session.interrupted ?? 0} · 恢复 {l2Session.resumed ?? 0}
+                                · 完结率 {l2SessionCompletionLabel} · 恢复率 {l2SessionRecoveryLabel}
+                            </div>
+                            <div style={{ marginTop: '0.22rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                开始意图采纳 {l2StartIntentionRateLabel} · 完成反馈采纳 {l2CompletionReflectionRateLabel}
+                            </div>
+                            <div style={{ marginTop: '0.48rem', display: 'grid', gap: '0.45rem' }}>
+                                <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                                    <input
+                                        type="text"
+                                        value={l2StartIntention}
+                                        onChange={(e) => setL2StartIntention(e.target.value)}
+                                        placeholder={l2SessionAction?.ritual?.start_intention_prompt || '开始前写一句本次会话意图'}
+                                        disabled={l2SessionActionLoading || l2SessionActive}
+                                        style={{
+                                            minWidth: '260px',
+                                            flex: '1 1 260px',
+                                            borderRadius: '6px',
+                                            border: '1px solid rgba(255,255,255,0.2)',
+                                            background: 'rgba(0,0,0,0.25)',
+                                            color: 'white',
+                                            padding: '0.25rem 0.4rem',
+                                            fontSize: '0.74rem'
+                                        }}
+                                    />
+                                    <button
+                                        type="button"
+                                        className="btn btn-primary"
+                                        onClick={() => handleL2SessionAction('start')}
+                                        disabled={l2SessionActionLoading || l2SessionActive}
+                                        style={{ fontSize: '0.76rem', padding: '0.25rem 0.7rem' }}
+                                    >
+                                        {l2SessionActionLoading ? '处理中...' : '开始 L2 会话'}
+                                    </button>
+                                </div>
+                                {(l2SessionResumeReady || l2SessionResumeHint) && (
+                                    <div style={{ display: 'grid', gap: '0.3rem' }}>
+                                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            {l2SessionResumeId ? `可恢复会话: ${l2SessionResumeId}` : '检测到可恢复会话'}
+                                            {l2Session?.resume_reason_label ? ` · 原因 ${l2Session.resume_reason_label}` : ''}
+                                        </div>
+                                        <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                                            <input
+                                                type="text"
+                                                value={l2ResumeStep}
+                                                onChange={(e) => setL2ResumeStep(e.target.value)}
+                                                placeholder={l2SessionResumeHint || '写下恢复后的最小回归步骤'}
+                                                disabled={l2SessionActionLoading || !l2SessionResumeReady}
+                                                style={{
+                                                    minWidth: '260px',
+                                                    flex: '1 1 260px',
+                                                    borderRadius: '6px',
+                                                    border: '1px solid rgba(255,255,255,0.2)',
+                                                    background: 'rgba(0,0,0,0.25)',
+                                                    color: 'white',
+                                                    padding: '0.25rem 0.4rem',
+                                                    fontSize: '0.74rem'
+                                                }}
+                                            />
+                                            <button
+                                                type="button"
+                                                className="btn btn-secondary"
+                                                onClick={() => handleL2SessionAction('resume')}
+                                                disabled={l2SessionActionLoading || !l2SessionResumeReady}
+                                                style={{ fontSize: '0.76rem', padding: '0.25rem 0.65rem' }}
+                                            >
+                                                恢复会话
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+                                <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                                    <input
+                                        type="text"
+                                        value={l2CompletionReflection}
+                                        onChange={(e) => setL2CompletionReflection(e.target.value)}
+                                        placeholder={l2SessionAction?.ritual?.complete_reflection_prompt || '完成后写一句反馈'}
+                                        disabled={l2SessionActionLoading || !l2SessionActive}
+                                        style={{
+                                            minWidth: '220px',
+                                            flex: '1 1 220px',
+                                            borderRadius: '6px',
+                                            border: '1px solid rgba(255,255,255,0.2)',
+                                            background: 'rgba(0,0,0,0.25)',
+                                            color: 'white',
+                                            padding: '0.25rem 0.4rem',
+                                            fontSize: '0.74rem'
+                                        }}
+                                    />
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={() => handleL2SessionAction('complete')}
+                                        disabled={l2SessionActionLoading || !l2SessionActive}
+                                        style={{ fontSize: '0.76rem', padding: '0.25rem 0.65rem' }}
+                                    >
+                                        完成会话
+                                    </button>
+                                    <select
+                                        value={l2InterruptReason}
+                                        onChange={(e) => setL2InterruptReason(e.target.value)}
+                                        disabled={l2SessionActionLoading || !l2SessionActive}
+                                        style={{
+                                            borderRadius: '6px',
+                                            border: '1px solid rgba(255,255,255,0.2)',
+                                            background: 'rgba(0,0,0,0.25)',
+                                            color: 'white',
+                                            padding: '0.25rem 0.35rem',
+                                            fontSize: '0.74rem'
+                                        }}
+                                    >
+                                        {l2InterruptReasonOptions.map((opt) => (
+                                            <option key={`l2_reason_${opt.value}`} value={opt.value}>
+                                                {opt.label || l2InterruptReasonLabelMap[opt.value] || opt.value}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={() => handleL2SessionAction('interrupt')}
+                                        disabled={l2SessionActionLoading || !l2SessionActive}
+                                        style={{ fontSize: '0.76rem', padding: '0.25rem 0.65rem' }}
+                                    >
+                                        记录中断
+                                    </button>
+                                </div>
+                            </div>
+                            {l2Session.latest && (
+                                <div style={{ marginTop: '0.35rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    最近会话事件: {l2Session.latest.type || '--'}
+                                    {l2Session.latest.reason_label ? ` · ${l2Session.latest.reason_label}` : ''}
+                                    {l2Session.latest.timestamp ? ` · ${l2Session.latest.timestamp}` : ''}
+                                </div>
+                            )}
+                            {l2SessionRecentEvents.length > 0 && (
+                                <div style={{ marginTop: '0.4rem', display: 'grid', gap: '0.28rem' }}>
+                                    {l2SessionRecentEvents.map((ev, idx) => (
+                                        <div
+                                            key={`l2_evt_${idx}`}
+                                            style={{
+                                                fontSize: '0.71rem',
+                                                color: 'var(--text-secondary)',
+                                                background: 'rgba(0,0,0,0.2)',
+                                                borderRadius: '6px',
+                                                padding: '0.28rem 0.42rem'
+                                            }}
+                                        >
+                                            [{ev.type || 'unknown'}] {ev.detail || '--'}
+                                            {ev.timestamp ? ` · ${ev.timestamp}` : ''}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Blueprint Narrative Loop</div>
+                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    {blueprintNarrativeCard?.title || 'How This Week Served Long-Term Value'}
+                                </div>
+                            </div>
+                            <div style={{ marginTop: '0.22rem', fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
+                                {blueprintNarrativeCard?.summary || '暂无叙事摘要'}
+                            </div>
+                            {blueprintNarrativeCard?.alignment_trend && (
+                                <div style={{ marginTop: '0.22rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    对齐趋势: {blueprintNarrativeCard.alignment_trend}
+                                </div>
+                            )}
+                            <div style={{ marginTop: '0.45rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.4rem' }}>
+                                {['wisdom', 'experience', 'connection'].map((key) => {
+                                    const dimension = blueprintDimensions?.[key] || {};
+                                    return (
+                                        <div
+                                            key={`blueprint_dim_${key}`}
+                                            style={{
+                                                border: '1px solid rgba(148,163,184,0.25)',
+                                                borderRadius: '8px',
+                                                padding: '0.4rem 0.45rem',
+                                                background: 'rgba(2, 6, 23, 0.2)'
+                                            }}
+                                        >
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.35rem', alignItems: 'center' }}>
+                                                <div style={{ fontSize: '0.73rem', textTransform: 'capitalize' }}>{key}</div>
+                                                <div style={{ fontSize: '0.68rem', color: dimension?.progress ? '#86efac' : '#fca5a5' }}>
+                                                    {dimension?.progress ? '有进展' : '待加强'}
+                                                </div>
+                                            </div>
+                                            <div style={{ marginTop: '0.18rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                                {dimension?.summary || '--'}
+                                            </div>
+                                            {Array.isArray(dimension?.evidence) && dimension.evidence.length > 0 && (
+                                                <div style={{ marginTop: '0.25rem', display: 'grid', gap: '0.2rem' }}>
+                                                    {dimension.evidence.slice(-2).map((ev, idx) => (
+                                                        <div key={`dim_ev_${key}_${idx}`} style={{ fontSize: '0.67rem', color: 'var(--text-secondary)' }}>
+                                                            [{ev.type || 'event'}] {ev.detail || '--'}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                            <div style={{ marginTop: '0.42rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                下周强化: {blueprintNarrativeCard?.reinforce_behavior || '--'}
+                            </div>
+                            <div style={{ marginTop: '0.18rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                下周减少: {blueprintNarrativeCard?.reduce_behavior || '--'}
+                            </div>
                         </div>
                         <div
                             style={{
@@ -1043,6 +1716,76 @@ export default function Home() {
                             }}>
                                 <div style={{ fontSize: '0.75rem', color: 'var(--accent-color)', fontWeight: 600 }}>建议</div>
                                 <p style={{ margin: '0.25rem 0 0.5rem 0', fontSize: '0.9rem' }}>{retrospective.suggestion}</p>
+                                <div
+                                    style={{
+                                        marginBottom: '0.55rem',
+                                        borderRadius: '8px',
+                                        border: '1px solid rgba(255,255,255,0.15)',
+                                        background: 'rgba(2, 6, 23, 0.18)',
+                                        padding: '0.45rem 0.55rem'
+                                    }}
+                                >
+                                    <div style={{ fontSize: '0.74rem', fontWeight: 600 }}>
+                                        为什么是这个建议
+                                    </div>
+                                    <div style={{ marginTop: '0.2rem', fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
+                                        {guardianExplainWhy}
+                                    </div>
+                                    <div style={{ marginTop: '0.38rem', fontSize: '0.74rem', fontWeight: 600 }}>
+                                        接下来会发生什么
+                                    </div>
+                                    <div style={{ marginTop: '0.2rem', fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
+                                        {guardianExplainNext}
+                                    </div>
+                                    {guardianExplainSignals.length > 0 && (
+                                        <div style={{ marginTop: '0.32rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                            信号: {guardianExplainSignals.join(' · ')}
+                                        </div>
+                                    )}
+                                </div>
+                                <div
+                                    style={{
+                                        marginBottom: '0.55rem',
+                                        borderRadius: '8px',
+                                        border: '1px solid rgba(255,255,255,0.15)',
+                                        background: 'rgba(255,255,255,0.04)',
+                                        padding: '0.45rem 0.55rem'
+                                    }}
+                                >
+                                    <div style={{ fontSize: '0.75rem', fontWeight: 600 }}>
+                                        当前代表: {guardianRoleRepresentingLabel} · 面向: {guardianRoleFacingLabel}
+                                    </div>
+                                    <div style={{ marginTop: '0.2rem', fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
+                                        {guardianRoleMessage}
+                                    </div>
+                                </div>
+
+                                <div style={{ marginBottom: '0.5rem', display: 'grid', gap: '0.25rem' }}>
+                                    <label style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        当前意图
+                                    </label>
+                                    <select
+                                        value={guardianResponseContext}
+                                        onChange={(e) => setGuardianResponseContext(e.target.value)}
+                                        style={{
+                                            borderRadius: '6px',
+                                            border: '1px solid rgba(255,255,255,0.2)',
+                                            background: 'rgba(0,0,0,0.25)',
+                                            color: 'white',
+                                            padding: '0.32rem 0.4rem',
+                                            maxWidth: '220px'
+                                        }}
+                                    >
+                                        {responseContextOptions.map((opt) => (
+                                            <option key={opt.value} value={opt.value}>
+                                                {opt.label}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        {responseContextHintMap[guardianResponseContext] || ''}
+                                    </div>
+                                </div>
 
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                                     <button
@@ -1084,6 +1827,12 @@ export default function Home() {
                                     <div style={{ marginTop: '0.35rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
                                         最近响应: {guardianLatestResponse.action || '--'}
                                         {guardianLatestResponse.timestamp ? ` · ${guardianLatestResponse.timestamp}` : ''}
+                                        {guardianLatestResponseContextLabel ? ` · ${guardianLatestResponseContextLabel}` : ''}
+                                    </div>
+                                )}
+                                {guardianLatestRecoveryStep && (
+                                    <div style={{ marginTop: '0.3rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        恢复下一步: {guardianLatestRecoveryStep}
                                     </div>
                                 )}
                             </div>
@@ -1157,18 +1906,45 @@ export default function Home() {
                     if (actionLoading) return;
                     setSkipDialogOpen(false);
                     setSkipReason('');
+                    setSkipContext('recovering');
                 }}
                 onConfirm={submitSkip}
                 confirmText={actionLoading ? '提交中...' : '确认跳过'}
                 disabled={actionLoading}
             >
                 <p style={{ color: 'var(--text-secondary)', margin: 0 }}>请填写跳过原因，便于 Guardian 复盘。</p>
+                <div style={{ marginTop: '0.65rem', display: 'grid', gap: '0.25rem' }}>
+                    <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                        跳过上下文
+                    </label>
+                    <select
+                        value={skipContext}
+                        onChange={(e) => setSkipContext(e.target.value)}
+                        style={{
+                            borderRadius: '6px',
+                            border: '1px solid rgba(255,255,255,0.2)',
+                            background: 'rgba(0,0,0,0.25)',
+                            color: 'white',
+                            padding: '0.35rem 0.45rem',
+                            maxWidth: '240px'
+                        }}
+                    >
+                        {responseContextOptions.map((opt) => (
+                            <option key={`skip_ctx_${opt.value}`} value={opt.value}>
+                                {opt.label}
+                            </option>
+                        ))}
+                    </select>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                        {responseContextHintMap[skipContext] || ''}
+                    </div>
+                </div>
                 <textarea
                     value={skipReason}
                     onChange={(e) => setSkipReason(e.target.value)}
                     rows={3}
                     style={{
-                        marginTop: '0.75rem',
+                        marginTop: '0.6rem',
                         width: '100%',
                         borderRadius: '8px',
                         border: '1px solid rgba(255,255,255,0.2)',
