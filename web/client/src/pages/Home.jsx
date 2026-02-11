@@ -78,6 +78,10 @@ export default function Home() {
     const [skipReason, setSkipReason] = useState('');
     const [deleteTargetGoalId, setDeleteTargetGoalId] = useState(null);
     const [guardianConfirmLoading, setGuardianConfirmLoading] = useState(false);
+    const [anchorDiff, setAnchorDiff] = useState(null);
+    const [anchorDiffLoading, setAnchorDiffLoading] = useState(false);
+    const [activateAnchorLoading, setActivateAnchorLoading] = useState(false);
+    const [activateAnchorModalOpen, setActivateAnchorModalOpen] = useState(false);
 
     const signalNameMap = {
         repeated_skip: '重复跳过',
@@ -253,6 +257,41 @@ export default function Home() {
         }
     };
 
+    const handleCheckAnchorDiff = async () => {
+        if (anchorDiffLoading) return;
+        try {
+            setAnchorDiffLoading(true);
+            setError(null);
+            const res = await api.get('/anchor/diff');
+            setAnchorDiff(res.data || null);
+        } catch (e) {
+            console.error(e);
+            setError('检查 Anchor 变更失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setAnchorDiffLoading(false);
+        }
+    };
+
+    const handleActivateAnchor = async () => {
+        if (activateAnchorLoading) return;
+        try {
+            setActivateAnchorLoading(true);
+            setError(null);
+            const res = await api.post('/anchor/activate', { force: false });
+            if (res.data?.status === 'noop') {
+                setError('Anchor 内容无变化，无需激活');
+            }
+            setActivateAnchorModalOpen(false);
+            setAnchorDiff(null);
+            await fetchAll();
+        } catch (e) {
+            console.error(e);
+            setError('激活 Anchor 失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setActivateAnchorLoading(false);
+        }
+    };
+
     const getGoalProgress = (goalId) => {
         const goalTasks = [...(tasks.pending || []), ...(tasks.completed || [])].filter((t) => t.goal_id === goalId);
         const completedCount = (tasks.completed || []).filter((t) => t.goal_id === goalId).length;
@@ -263,6 +302,8 @@ export default function Home() {
         () => (goals.active || []).filter((g) => !g.parent_id && g.layer !== 'vision'),
         [goals.active]
     );
+    const anchorDiffStatus = anchorDiff?.diff?.status || null;
+    const canActivateAnchor = anchorDiffStatus === 'new' || anchorDiffStatus === 'changed';
 
     if (loading) {
         return (
@@ -387,6 +428,46 @@ export default function Home() {
                         <div style={{ marginTop: '0.6rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                             {weeklyAlignmentTrend?.summary || '暂无周对齐趋势数据'}
                         </div>
+                        <div style={{ marginTop: '0.7rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                            <button
+                                type="button"
+                                className="btn btn-secondary"
+                                onClick={handleCheckAnchorDiff}
+                                disabled={anchorDiffLoading}
+                                style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
+                            >
+                                {anchorDiffLoading ? '检查中...' : '检查 Anchor 变更'}
+                            </button>
+                            {canActivateAnchor && (
+                                <button
+                                    type="button"
+                                    className="btn btn-primary"
+                                    onClick={() => setActivateAnchorModalOpen(true)}
+                                    disabled={activateAnchorLoading}
+                                    style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
+                                >
+                                    激活新 Anchor
+                                </button>
+                            )}
+                        </div>
+                        {anchorDiff?.diff && (
+                            <div style={{ marginTop: '0.65rem', fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                                <div>
+                                    变更状态: {anchorDiff.diff.status}
+                                    {anchorDiff.diff.version_change ? ` (${anchorDiff.diff.version_change})` : ''}
+                                </div>
+                                {(anchorDiff.diff.added_commitments?.length > 0 || anchorDiff.diff.removed_commitments?.length > 0) && (
+                                    <div style={{ marginTop: '0.25rem' }}>
+                                        承诺变化: +{anchorDiff.diff.added_commitments?.length || 0} / -{anchorDiff.diff.removed_commitments?.length || 0}
+                                    </div>
+                                )}
+                                {(anchorDiff.diff.added_anti_values?.length > 0 || anchorDiff.diff.removed_anti_values?.length > 0) && (
+                                    <div style={{ marginTop: '0.15rem' }}>
+                                        反价值变化: +{anchorDiff.diff.added_anti_values?.length || 0} / -{anchorDiff.diff.removed_anti_values?.length || 0}
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </div>
 
                     {goalTree.length > 0 ? (
@@ -687,6 +768,22 @@ export default function Home() {
             >
                 <p style={{ color: 'var(--text-secondary)', margin: 0 }}>
                     删除后该目标将从当前视图移除。是否继续？
+                </p>
+            </OverlayModal>
+
+            <OverlayModal
+                open={activateAnchorModalOpen}
+                title="激活新 Anchor"
+                onCancel={() => {
+                    if (activateAnchorLoading) return;
+                    setActivateAnchorModalOpen(false);
+                }}
+                onConfirm={handleActivateAnchor}
+                confirmText={activateAnchorLoading ? '激活中...' : '确认激活'}
+                disabled={activateAnchorLoading}
+            >
+                <p style={{ color: 'var(--text-secondary)', margin: 0 }}>
+                    激活后 Guardian 与目标对齐会切换到新的价值锚点版本。是否继续？
                 </p>
             </OverlayModal>
         </div>

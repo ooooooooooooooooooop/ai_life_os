@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -46,6 +47,10 @@ class RetrospectiveConfirmRequest(BaseModel):
     note: Optional[str] = None
 
 
+class AnchorActivateRequest(BaseModel):
+    force: bool = False
+
+
 def get_steward() -> Steward:
     state = ensure_tick_applied()
     registry = GoalRegistry()
@@ -54,6 +59,53 @@ def get_steward() -> Steward:
 
 def get_goal_service() -> GoalService:
     return GoalService()
+
+
+BLUEPRINT_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "docs"
+    / "concepts"
+    / "better_human_blueprint.md"
+)
+
+
+def _anchor_payload(anchor) -> dict:
+    if not anchor:
+        return {
+            "active": False,
+            "version": None,
+            "created_at": None,
+            "confirmed_by_user": False,
+            "non_negotiables_count": 0,
+            "commitments_count": 0,
+            "anti_values_count": 0,
+            "instinct_adversaries_count": 0,
+        }
+    return {
+        "active": True,
+        "version": anchor.version,
+        "created_at": anchor.created_at,
+        "confirmed_by_user": bool(anchor.confirmed_by_user),
+        "non_negotiables_count": len(anchor.non_negotiables or ()),
+        "commitments_count": len(anchor.long_horizon_commitments or ()),
+        "anti_values_count": len(anchor.anti_values or ()),
+        "instinct_adversaries_count": len(anchor.instinct_adversaries or ()),
+    }
+
+
+def _anchor_diff_payload(diff) -> dict:
+    return {
+        "status": diff.status,
+        "version_change": diff.version_change,
+        "added_non_negotiables": sorted(list(diff.added_non_negotiables or set())),
+        "removed_non_negotiables": sorted(list(diff.removed_non_negotiables or set())),
+        "added_commitments": sorted(list(diff.added_commitments or set())),
+        "removed_commitments": sorted(list(diff.removed_commitments or set())),
+        "added_anti_values": sorted(list(diff.added_anti_values or set())),
+        "removed_anti_values": sorted(list(diff.removed_anti_values or set())),
+        "added_adversaries": sorted(list(diff.added_adversaries or set())),
+        "removed_adversaries": sorted(list(diff.removed_adversaries or set())),
+    }
 
 
 def _has_review_due_this_week() -> bool:
@@ -155,23 +207,11 @@ async def get_state():
     guardian_state = system_state.get("guardian") or {}
     alignment_summary = service.summarize_alignment(registry.objectives + registry.goals)
     alignment_trend = (retrospective.get("alignment") or {}).get("trend", {})
-    anchor_snapshot = {
-        "active": False,
-        "version": None,
-        "created_at": None,
-        "commitments_count": 0,
-        "anti_values_count": 0,
-    }
+    anchor_snapshot = _anchor_payload(None)
     try:
         anchor = AnchorManager().get_current()
         if anchor:
-            anchor_snapshot = {
-                "active": True,
-                "version": anchor.version,
-                "created_at": anchor.created_at,
-                "commitments_count": len(anchor.long_horizon_commitments or ()),
-                "anti_values_count": len(anchor.anti_values or ()),
-            }
+            anchor_snapshot = _anchor_payload(anchor)
     except Exception:
         pass
 
@@ -261,6 +301,84 @@ async def confirm_retrospective_intervention(request: RetrospectiveConfirmReques
 
     updated_payload = build_guardian_retrospective_response(days)
     return {"status": "confirmed", "retrospective": updated_payload}
+
+
+@router.get("/anchor/current")
+async def get_anchor_current():
+    try:
+        anchor = AnchorManager().get_current()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load anchor: {exc}")
+    return {
+        "blueprint_path": str(BLUEPRINT_PATH),
+        "anchor": _anchor_payload(anchor),
+    }
+
+
+@router.get("/anchor/diff")
+async def get_anchor_diff():
+    if not BLUEPRINT_PATH.exists():
+        raise HTTPException(status_code=404, detail=f"Blueprint file not found: {BLUEPRINT_PATH}")
+
+    manager = AnchorManager()
+    current = manager.get_current()
+    try:
+        draft = manager.generate_draft(str(BLUEPRINT_PATH))
+        diff = manager.diff(current, draft)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to generate anchor diff: {exc}")
+
+    return {
+        "blueprint_path": str(BLUEPRINT_PATH),
+        "current": _anchor_payload(current),
+        "draft": _anchor_payload(draft),
+        "diff": _anchor_diff_payload(diff),
+    }
+
+
+@router.post("/anchor/activate")
+async def activate_anchor(request: AnchorActivateRequest):
+    if not BLUEPRINT_PATH.exists():
+        raise HTTPException(status_code=404, detail=f"Blueprint file not found: {BLUEPRINT_PATH}")
+
+    manager = AnchorManager()
+    current = manager.get_current()
+    try:
+        draft = manager.generate_draft(str(BLUEPRINT_PATH))
+        diff = manager.diff(current, draft)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to generate anchor draft: {exc}")
+
+    if current and diff.status == "unchanged" and not request.force:
+        return {
+            "status": "noop",
+            "reason": "anchor_unchanged",
+            "current": _anchor_payload(current),
+            "diff": _anchor_diff_payload(diff),
+        }
+
+    try:
+        activated = manager.activate(draft)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to activate anchor: {exc}")
+
+    append_event(
+        {
+            "type": "anchor_activated",
+            "timestamp": datetime.now().isoformat(),
+            "payload": {
+                "version": activated.version,
+                "source_hash": activated.source_hash,
+                "blueprint_path": str(BLUEPRINT_PATH),
+            },
+        }
+    )
+
+    return {
+        "status": "activated",
+        "anchor": _anchor_payload(activated),
+        "diff": _anchor_diff_payload(diff),
+    }
 
 
 @router.get("/visions")
