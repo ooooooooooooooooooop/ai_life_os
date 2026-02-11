@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from core.event_sourcing import EVENT_LOG_PATH, append_event
+from core.event_sourcing import EVENT_LOG_PATH, EVENT_SCHEMA_VERSION, append_event
 from core.feedback_classifier import classify_feedback
 from core.goal_service import GoalService
 from core.interaction_handler import InteractionHandler
@@ -78,6 +78,33 @@ def _has_review_due_this_week() -> bool:
     return False
 
 
+def _normalized_audit(
+    raw_audit: Optional[dict],
+    default_strategy: str,
+    default_trigger: str,
+    default_constraint: str = "",
+    default_risk: str = "",
+) -> dict:
+    audit = raw_audit if isinstance(raw_audit, dict) else {}
+    decision_reason = audit.get("decision_reason", {})
+    if not isinstance(decision_reason, dict):
+        decision_reason = {}
+
+    used_state_fields = audit.get("used_state_fields", [])
+    if not isinstance(used_state_fields, list):
+        used_state_fields = []
+
+    return {
+        "strategy": audit.get("strategy") or default_strategy,
+        "used_state_fields": used_state_fields,
+        "decision_reason": {
+            "trigger": decision_reason.get("trigger") or default_trigger,
+            "constraint": decision_reason.get("constraint") or default_constraint,
+            "risk": decision_reason.get("risk") or default_risk,
+        },
+    }
+
+
 @router.get("/state")
 async def get_state():
     steward = get_steward()
@@ -102,6 +129,28 @@ async def get_state():
             == "pending"
         ]
 
+    state_audit = _normalized_audit(
+        raw_audit={
+            "strategy": "state_projection",
+            "used_state_fields": [
+                "identity",
+                "profile",
+                "rhythm",
+                "ongoing.active_tasks",
+                "tasks",
+                "goal_registry",
+                "event_log.review_due",
+            ],
+            "decision_reason": {
+                "trigger": "State requested by API client",
+                "constraint": "Read-model projection only",
+                "risk": "Stale reads if filesystem is modified externally",
+            },
+        },
+        default_strategy="state_projection",
+        default_trigger="State requested by API client",
+    )
+
     return {
         "identity": identity,
         "metrics": system_state.get("rhythm") or {},
@@ -120,6 +169,11 @@ async def get_state():
             "queue_load": len(active_tasks),
         },
         "weekly_review_due": _has_review_due_this_week(),
+        "audit": state_audit,
+        "meta": {
+            "event_schema_version": EVENT_SCHEMA_VERSION,
+            "generated_at": datetime.now().isoformat(),
+        },
     }
 
 
@@ -303,11 +357,18 @@ async def stream_events():
 async def trigger_cycle():
     steward = get_steward()
     plan = steward.run_planning_cycle()
+    audit = _normalized_audit(
+        raw_audit=plan.get("audit", {}),
+        default_strategy="planning_cycle",
+        default_trigger="Manual cycle trigger",
+        default_constraint="Daily planning bounds",
+        default_risk="Over-allocation or stale context",
+    )
     return {
         "status": "cycled",
         "generated_actions": plan.get("actions", []),
         "executed_auto_tasks": plan.get("executed_auto_tasks", []),
-        "audit": plan.get("audit", {}),
+        "audit": audit,
     }
 
 

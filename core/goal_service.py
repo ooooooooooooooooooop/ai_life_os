@@ -33,6 +33,15 @@ class GoalService:
         return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
     @staticmethod
+    def id_prefix_for_layer(layer: GoalLayer) -> str:
+        mapping = {
+            GoalLayer.VISION: "vision",
+            GoalLayer.OBJECTIVE: "obj",
+            GoalLayer.GOAL: "g",
+        }
+        return mapping.get(layer, "g")
+
+    @staticmethod
     def source_from_string(source: Optional[str]) -> GoalSource:
         if not source:
             return GoalSource.USER_INPUT
@@ -225,6 +234,34 @@ class GoalService:
             layer=GoalLayer.VISION,
             state=GoalState.ACTIVE,
             source=self.source_from_string(source),
+        )
+        self.registry.add_node(node)
+        self._emit_canonical_event("goal_registry_created", node)
+        return node
+
+    def create_node(
+        self,
+        title: str,
+        description: str = "",
+        layer: GoalLayer = GoalLayer.GOAL,
+        state: GoalState = GoalState.ACTIVE,
+        source: str = GoalSource.USER_INPUT.value,
+        parent_id: Optional[str] = None,
+        goal_type: Optional[str] = None,
+        node_id: Optional[str] = None,
+    ) -> ObjectiveNode:
+        """
+        Create a canonical objective node and always emit the standard registry event.
+        """
+        node = ObjectiveNode(
+            id=node_id or self._new_id(self.id_prefix_for_layer(layer)),
+            title=title,
+            description=description,
+            layer=layer,
+            state=state,
+            source=self.source_from_string(source),
+            parent_id=parent_id,
+            goal_type=goal_type,
         )
         self.registry.add_node(node)
         self._emit_canonical_event("goal_registry_created", node)
@@ -473,6 +510,7 @@ class GoalService:
             parent.children_ids.append(child.id)
             parent.updated_at = datetime.now().isoformat()
             self.registry.update_node(parent)
+            self._emit_canonical_event("goal_registry_updated", parent)
 
         self._emit_canonical_event("goal_registry_created", child)
 

@@ -9,6 +9,7 @@ This module implements the core event sourcing logic:
 import json
 import logging
 from datetime import datetime, date
+from uuid import uuid4
 from typing import Any, Dict
 
 # Core Data Models
@@ -20,6 +21,9 @@ EVENT_LOG_PATH = DATA_DIR / "event_log.jsonl"
 STATE_SNAPSHOT_PATH = DATA_DIR / "character_state.json"
 
 logger = logging.getLogger("event_sourcing")
+
+EVENT_SCHEMA_VERSION = "1.0"
+REQUIRED_EVENT_FIELDS = ("type", "timestamp", "schema_version", "event_id")
 
 # --- Initial State Structure ---
 
@@ -197,23 +201,49 @@ def rebuild_state() -> Dict[str, Any]:
 
     return state
 
+def validate_event_shape(event: Dict[str, Any], strict: bool = False) -> Dict[str, Any]:
+    """
+    Validate event shape and return validation details.
+
+    Args:
+        event: Event dictionary
+        strict: If True, all required fields are mandatory.
+            If False, only `type` and `timestamp` are mandatory (legacy-compatible).
+    """
+    missing = []
+    required = REQUIRED_EVENT_FIELDS if strict else ("type", "timestamp")
+    for field in required:
+        if not event.get(field):
+            missing.append(field)
+    return {"valid": not missing, "missing": missing}
+
+
+def normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize an event to the canonical shape.
+    """
+    normalized = dict(event)
+    normalized.setdefault("timestamp", datetime.now().isoformat())
+    normalized.setdefault("schema_version", EVENT_SCHEMA_VERSION)
+    normalized.setdefault("event_id", f"evt_{uuid4().hex[:12]}")
+    return normalized
+
+
 def append_event(event: Dict[str, Any]) -> None:
     """
     Append an event to the event log.
     After append: time_tick -> create_snapshot(force=True); else -> create_snapshot() if interval.
     """
-    if "timestamp" not in event:
-        event["timestamp"] = datetime.now().isoformat()
+    normalized_event = normalize_event(event)
 
     EVENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     with open(EVENT_LOG_PATH, "a", encoding="utf-8") as f:
-        f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+        f.write(json.dumps(normalized_event, ensure_ascii=False, default=str) + "\n")
 
     from core.snapshot_manager import create_snapshot, should_create_snapshot
-    if event.get("type") == "time_tick":
+    if normalized_event.get("type") == "time_tick":
         create_snapshot(force=True)
     elif should_create_snapshot():
         create_snapshot()
-
 

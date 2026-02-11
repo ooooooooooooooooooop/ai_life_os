@@ -2,6 +2,7 @@ import json
 from typing import Dict, Any, List
 from pydantic import BaseModel
 
+from core.goal_service import GoalService
 from core.llm_adapter import get_llm
 from core.objective_engine.models import GoalState
 from core.objective_engine.registry import GoalRegistry
@@ -139,14 +140,13 @@ class InteractionHandler:
                 constraints[field] = v
 
     def _handle_goal_feedback(self, updates: Dict[str, Any]):
+        service = GoalService(registry=self.registry)
+
         for k, v in updates.items():
-            # k might be goal ID
             goal = self.registry.get_node(k)
-            if goal:
-                status = v.upper()
-                if status == "COMPLETE":
-                    goal.state = GoalState.COMPLETED
-                elif status == "SKIP":
-                    goal.skip_count += 1
-                # ... other states
-                self.registry.update_node(goal)
+            if not goal:
+                continue
+
+            status = str(v).strip().lower()
+            if status in {"complete", "skip", "blocked", "defer", "partial"}:
+                service.apply_feedback(k, status)

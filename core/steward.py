@@ -23,7 +23,7 @@ from core.goal_decomposer import GoalType
 import uuid
 from core.utils import load_prompt, parse_llm_json
 from core.objective_engine.registry import GoalRegistry
-from core.objective_engine.models import GoalState, ObjectiveNode, GoalLayer, GoalSource
+from core.objective_engine.models import GoalState
 from core.strategic_engine.bhb_parser import parse_bhb
 from core.rule_evaluator import RuleEvaluator
 
@@ -467,11 +467,15 @@ class Steward:
     def _infer_missing_goals(self) -> List[Dict]:
         """
         [Steward Upgrade] Proactively infer Vision and Goals using LLM engines.
-        Writes directly to GoalRegistry with PENDING_CONFIRMATION state.
+        Writes through GoalService with canonical goal_registry_* events.
         Returns: A list of maintenance actions (e.g. notifications), not the goals themselves.
         """
+        from core.goal_service import GoalService
+        from core.objective_engine.models import GoalLayer, GoalSource
+
         actions = []
         registry = self.registry
+        service = GoalService(registry=registry)
 
         # 1. Infer Vision if missing
         if not registry.visions:
@@ -481,15 +485,13 @@ class Steward:
                 vision_inf = infer_vision(self.state, enable_search=True)
 
                 if vision_inf:
-                    vision_node = ObjectiveNode(
-                        id=f"vis_{str(uuid.uuid4())[:8]}",
+                    vision_node = service.create_node(
                         title=vision_inf.title,
                         description=vision_inf.description,
                         layer=GoalLayer.VISION,
-                        state=GoalState.ACTIVE, # Vision is active by default (foundational)
-                        source=GoalSource.SYSTEM
+                        state=GoalState.ACTIVE,
+                        source=GoalSource.SYSTEM.value,
                     )
-                    registry.add_node(vision_node)
                     print(f"[Steward] Inferred Vision: {vision_node.title}")
 
                     actions.append({
@@ -515,19 +517,16 @@ class Steward:
 
                 for ig in inferred_goals:
                     pending_id = f"auto_{str(uuid.uuid4())[:6]}"
-                    goal_node = ObjectiveNode(
-                        id=pending_id,
+                    parent_id = registry.visions[0].id if registry.visions else None
+                    goal_node = service.create_node(
                         title=ig.title,
                         description=ig.description,
                         layer=GoalLayer.GOAL,
-                        state=GoalState.VISION_PENDING_CONFIRMATION, # Requires User Confirm
-                        source=GoalSource.SYSTEM
+                        state=GoalState.VISION_PENDING_CONFIRMATION,
+                        source=GoalSource.SYSTEM.value,
+                        parent_id=parent_id,
+                        node_id=pending_id,
                     )
-                    # Link to Vision if exists
-                    if registry.visions:
-                        goal_node.parent_id = registry.visions[0].id
-
-                    registry.add_node(goal_node)
                     print(f"[Steward] Inferred Goal: {goal_node.title}")
 
                     actions.append({

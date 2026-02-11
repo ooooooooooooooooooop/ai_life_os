@@ -36,6 +36,18 @@ export default function Home() {
     const [retrospective, setRetrospective] = useState(null);
     const [weeklyReviewDue, setWeeklyReviewDue] = useState(false);
 
+    const signalNameMap = {
+        repeated_skip: '重复跳过',
+        l2_interruption: '深度时段中断',
+        stagnation: '推进停滞'
+    };
+
+    const severityStyleMap = {
+        high: { background: 'rgba(239, 68, 68, 0.2)', color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.4)' },
+        medium: { background: 'rgba(245, 158, 11, 0.2)', color: '#fcd34d', border: '1px solid rgba(245, 158, 11, 0.35)' },
+        info: { background: 'rgba(59, 130, 246, 0.2)', color: '#93c5fd', border: '1px solid rgba(59, 130, 246, 0.35)' }
+    };
+
     useEffect(() => {
         fetchAll();
     }, []);
@@ -526,6 +538,78 @@ export default function Home() {
                                 {retrospective.require_confirm && (
                                     <p style={{ margin: '0.5rem 0 0 0', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>请确认已读</p>
                                 )}
+                            </div>
+                        )}
+
+                        {retrospective.suggestion_sources?.length > 0 && (
+                            <div style={{ marginTop: '1rem' }}>
+                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', marginBottom: '0.75rem', fontWeight: 600 }}>
+                                    建议来源（可追溯）
+                                </div>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                                    {retrospective.suggestion_sources.map((src, idx) => {
+                                        const severityStyle = severityStyleMap[src.severity] || severityStyleMap.info;
+                                        return (
+                                            <div
+                                                key={`${src.signal || 'signal'}_${idx}`}
+                                                style={{
+                                                    border: '1px solid var(--glass-border)',
+                                                    borderRadius: '8px',
+                                                    padding: '0.75rem',
+                                                    background: 'rgba(255,255,255,0.03)'
+                                                }}
+                                            >
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                                        <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>
+                                                            {signalNameMap[src.signal] || src.signal}
+                                                        </span>
+                                                        <span style={{
+                                                            ...severityStyle,
+                                                            fontSize: '0.7rem',
+                                                            borderRadius: '999px',
+                                                            padding: '0.1rem 0.45rem',
+                                                            fontWeight: 600
+                                                        }}>
+                                                            {String(src.severity || 'info').toUpperCase()}
+                                                        </span>
+                                                    </div>
+                                                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>
+                                                        命中 {src.count ?? 0} / 阈值 {src.threshold ?? '-'}
+                                                    </span>
+                                                </div>
+
+                                                <p style={{ margin: '0.5rem 0 0 0', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                                    {src.summary}
+                                                </p>
+
+                                                {src.evidence?.length > 0 && (
+                                                    <div style={{ marginTop: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                                                        {src.evidence.map((ev, evIdx) => (
+                                                            <div
+                                                                key={`${src.signal || 'signal'}_ev_${evIdx}`}
+                                                                style={{
+                                                                    fontSize: '0.75rem',
+                                                                    color: 'var(--text-secondary)',
+                                                                    background: 'rgba(0,0,0,0.2)',
+                                                                    borderRadius: '6px',
+                                                                    padding: '0.4rem 0.5rem'
+                                                                }}
+                                                            >
+                                                                <div>
+                                                                    [{ev.type || 'unknown'}] {ev.detail || 'no detail'}
+                                                                </div>
+                                                                <div style={{ opacity: 0.85 }}>
+                                                                    {ev.timestamp || 'no timestamp'} {ev.event_id ? `· ${ev.event_id}` : ''}
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
                             </div>
                         )}
                     </div>

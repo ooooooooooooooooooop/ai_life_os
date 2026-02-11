@@ -80,3 +80,19 @@ Migrate existing data:
 ```bash
 python tools/migrate_data_dir.py --dest D:\ai-life-os-data
 ```
+
+## Event Log Schema Utilities
+
+- Validate replay integrity:
+
+```bash
+python tools/validate_event_replay.py
+python tools/validate_event_replay.py --strict
+```
+
+- Migrate event log to canonical schema fields (`schema_version`, `event_id`):
+
+```bash
+python tools/migrate_event_log_schema.py
+python tools/migrate_event_log_schema.py --apply
+```

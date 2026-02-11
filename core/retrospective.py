@@ -11,8 +11,9 @@ import json
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+from core.config_manager import config
 from core.event_sourcing import EVENT_LOG_PATH
 from core.llm_adapter import get_llm
 
@@ -172,6 +173,165 @@ def calculate_activity_trend(events: List[Dict[str, Any]]) -> Dict[str, int]:
                 continue
 
     return dict(daily_counts)
+
+
+def _parse_event_time(event: Dict[str, Any]) -> Optional[datetime]:
+    """Parse event timestamp to naive datetime."""
+    timestamp_str = event.get("timestamp", "")
+    if not timestamp_str:
+        return None
+    try:
+        parsed = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _phase_for_time(dt: datetime) -> str:
+    """Map datetime to configured energy phase."""
+    current_time = dt.strftime("%H:%M")
+    for time_range, phase in config.ENERGY_PHASES.items():
+        start_str, end_str = time_range.split("-")
+        if start_str <= current_time < end_str:
+            return phase
+    return config.DEFAULT_ENERGY_PHASE
+
+
+def _is_task_skip_event(event: Dict[str, Any]) -> bool:
+    """Detect task skip-like events from event payload."""
+    event_type = event.get("type")
+    if event_type == "task_failed" and event.get("failure_type") == "skipped":
+        return True
+    if event_type != "task_updated":
+        return False
+    payload = event.get("payload") or {}
+    updates = payload.get("updates", {}) if isinstance(payload, dict) else {}
+    status = str(updates.get("status", "")).lower()
+    return status == "skipped"
+
+
+def _is_progress_event(event: Dict[str, Any]) -> bool:
+    """Events that indicate forward progress."""
+    event_type = event.get("type")
+    if event_type in {"goal_completed", "progress_updated"}:
+        return True
+    if event_type == "execution_completed":
+        outcome = str((event.get("payload") or {}).get("outcome", "")).lower()
+        return outcome == "completed"
+    if event_type != "task_updated":
+        return False
+    payload = event.get("payload") or {}
+    updates = payload.get("updates", {}) if isinstance(payload, dict) else {}
+    status = str(updates.get("status", "")).lower()
+    return status == "completed"
+
+
+def _event_evidence(event: Dict[str, Any], detail: str) -> Dict[str, Any]:
+    return {
+        "event_id": event.get("event_id"),
+        "type": event.get("type"),
+        "timestamp": event.get("timestamp"),
+        "detail": detail,
+    }
+
+
+def _detect_deviation_signals(events: List[Dict[str, Any]], days: int) -> List[Dict[str, Any]]:
+    """
+    Detect behavior deviation signals and provide traceable evidence.
+    """
+    skip_events: List[Dict[str, Any]] = []
+    l2_interruptions: List[Dict[str, Any]] = []
+    progress_events: List[Dict[str, Any]] = []
+
+    for event in events:
+        event_time = _parse_event_time(event)
+
+        if _is_task_skip_event(event):
+            skip_events.append(event)
+            if event_time and _phase_for_time(event_time) == "deep_work":
+                l2_interruptions.append(event)
+
+        if _is_progress_event(event):
+            progress_events.append(event)
+
+    repeated_skip_count = len(skip_events)
+    repeated_skip_active = repeated_skip_count >= 2
+
+    l2_interruption_count = len(l2_interruptions)
+    l2_interruption_active = l2_interruption_count >= 1
+
+    now = datetime.now()
+    recent_progress_time = max(
+        (_parse_event_time(ev) for ev in progress_events if _parse_event_time(ev)),
+        default=None,
+    )
+    stagnation_threshold_days = 3 if days >= 3 else 1
+    if recent_progress_time is None:
+        days_without_progress = days
+    else:
+        days_without_progress = max(0, (now - recent_progress_time).days)
+    stagnation_active = days_without_progress >= stagnation_threshold_days
+
+    signals = [
+        {
+            "name": "repeated_skip",
+            "active": repeated_skip_active,
+            "severity": "medium" if repeated_skip_active else "info",
+            "count": repeated_skip_count,
+            "threshold": 2,
+            "summary": (
+                f"检测到 {repeated_skip_count} 次跳过行为，可能存在执行摩擦。"
+                if repeated_skip_active
+                else "未检测到重复跳过行为。"
+            ),
+            "evidence": [
+                _event_evidence(ev, "task skipped")
+                for ev in skip_events[-3:]
+            ],
+        },
+        {
+            "name": "l2_interruption",
+            "active": l2_interruption_active,
+            "severity": "high" if l2_interruption_active else "info",
+            "count": l2_interruption_count,
+            "threshold": 1,
+            "summary": (
+                f"深度工作时段检测到 {l2_interruption_count} 次跳过，存在 L2 执行中断。"
+                if l2_interruption_active
+                else "未检测到深度工作时段中断信号。"
+            ),
+            "evidence": [
+                _event_evidence(ev, f"skip during {_phase_for_time(_parse_event_time(ev) or now)}")
+                for ev in l2_interruptions[-3:]
+            ],
+        },
+        {
+            "name": "stagnation",
+            "active": stagnation_active,
+            "severity": "medium" if stagnation_active else "info",
+            "count": days_without_progress,
+            "threshold": stagnation_threshold_days,
+            "summary": (
+                f"最近 {days_without_progress} 天未观察到明确推进事件，存在停滞风险。"
+                if stagnation_active
+                else "近期推进节奏正常。"
+            ),
+            "evidence": (
+                []
+                if recent_progress_time is None
+                else [
+                    {
+                        "event_id": None,
+                        "type": "progress_marker",
+                        "timestamp": recent_progress_time.isoformat(),
+                        "detail": "latest progress timestamp",
+                    }
+                ]
+            ),
+        },
+    ]
+
+    return signals
 
 
 def generate_report(days: int = 7) -> Dict[str, Any]:
@@ -357,6 +517,7 @@ def _guardian_observations(
     rhythm: Dict[str, Any],
     alignment: Dict[str, Any],
     friction: Dict[str, Any],
+    deviation_signals: Optional[List[Dict[str, Any]]] = None,
 ) -> List[str]:
     """1–3 条 Guardian 观察，由三维度派生，不硬编码固定文案。"""
     out = []
@@ -371,6 +532,13 @@ def _guardian_observations(
         )
     if friction.get("repeated_skip"):
         out.append(friction.get("summary", "存在多次跳过任务，建议拆分为更小步骤或调整优先级。"))
+    if deviation_signals:
+        active_signal_summaries = [
+            s.get("summary")
+            for s in deviation_signals
+            if s.get("active") and s.get("summary")
+        ]
+        out.extend(active_signal_summaries[:2])
     if not out:
         out.append("本周期执行平稳，无异常信号。")
     return out[:3]
@@ -389,7 +557,8 @@ def generate_guardian_retrospective(days: int = 7) -> Dict[str, Any]:
     rhythm = _guardian_rhythm(events, days)
     alignment = _guardian_alignment(events)
     friction = _guardian_friction(events)
-    observations = _guardian_observations(rhythm, alignment, friction)
+    deviation_signals = _detect_deviation_signals(events, days)
+    observations = _guardian_observations(rhythm, alignment, friction, deviation_signals)
 
     return {
         "period": {"days": days, "start_date": start_date, "end_date": end_date},
@@ -397,6 +566,7 @@ def generate_guardian_retrospective(days: int = 7) -> Dict[str, Any]:
         "rhythm": rhythm,
         "alignment": alignment,
         "friction": friction,
+        "deviation_signals": deviation_signals,
         "observations": observations,
     }
 
@@ -432,8 +602,21 @@ def build_guardian_retrospective_response(days: int = 7) -> Dict[str, Any]:
     )
     display = level in ("SOFT", "ASK")
     require_confirm = level == "ASK"
+    suggestion_sources = [
+        {
+            "signal": signal.get("name"),
+            "severity": signal.get("severity"),
+            "summary": signal.get("summary"),
+            "count": signal.get("count", 0),
+            "threshold": signal.get("threshold"),
+            "evidence": signal.get("evidence", []),
+        }
+        for signal in raw.get("deviation_signals", [])
+        if signal.get("active")
+    ]
     raw["intervention_level"] = level
     raw["suggestion"] = suggestion
     raw["display"] = display
     raw["require_confirm"] = require_confirm
+    raw["suggestion_sources"] = suggestion_sources
     return raw
