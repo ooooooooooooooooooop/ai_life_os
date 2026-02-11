@@ -108,6 +108,24 @@ def _anchor_diff_payload(diff) -> dict:
     }
 
 
+def _load_latest_event(event_type: str) -> Optional[dict]:
+    if not EVENT_LOG_PATH.exists():
+        return None
+    with open(EVENT_LOG_PATH, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    for raw in reversed(lines):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == event_type:
+            return event
+    return None
+
+
 def _has_review_due_this_week() -> bool:
     if not EVENT_LOG_PATH.exists():
         return False
@@ -342,6 +360,7 @@ async def activate_anchor(request: AnchorActivateRequest):
         raise HTTPException(status_code=404, detail=f"Blueprint file not found: {BLUEPRINT_PATH}")
 
     manager = AnchorManager()
+    service = get_goal_service()
     current = manager.get_current()
     try:
         draft = manager.generate_draft(str(BLUEPRINT_PATH))
@@ -374,10 +393,51 @@ async def activate_anchor(request: AnchorActivateRequest):
         }
     )
 
+    recompute_result = service.recompute_active_alignment(detail_limit=100)
+    append_event(
+        {
+            "type": "goal_alignment_recomputed",
+            "timestamp": datetime.now().isoformat(),
+            "payload": {
+                "anchor_version": activated.version,
+                **recompute_result,
+            },
+        }
+    )
+
     return {
         "status": "activated",
         "anchor": _anchor_payload(activated),
         "diff": _anchor_diff_payload(diff),
+        "effect": {
+            "available": True,
+            "anchor_version": activated.version,
+            **recompute_result,
+        },
+    }
+
+
+@router.get("/anchor/effect")
+async def get_anchor_effect():
+    latest = _load_latest_event("goal_alignment_recomputed")
+    if latest and isinstance(latest.get("payload"), dict):
+        payload = dict(latest["payload"])
+        payload["available"] = True
+        payload["generated_at"] = latest.get("timestamp")
+        return payload
+
+    service = get_goal_service()
+    current_summary = service.summarize_alignment()
+    return {
+        "available": False,
+        "generated_at": None,
+        "anchor_version": None,
+        "total_processed": current_summary.get("total_active", 0),
+        "affected_count": 0,
+        "avg_score_delta": None,
+        "before": current_summary,
+        "after": current_summary,
+        "impacted_goals": [],
     }
 
 

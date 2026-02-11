@@ -73,6 +73,7 @@ export default function Home() {
     const [anchorSnapshot, setAnchorSnapshot] = useState(null);
     const [alignmentOverview, setAlignmentOverview] = useState(null);
     const [weeklyAlignmentTrend, setWeeklyAlignmentTrend] = useState(null);
+    const [anchorEffect, setAnchorEffect] = useState(null);
 
     const [skipDialogOpen, setSkipDialogOpen] = useState(false);
     const [skipReason, setSkipReason] = useState('');
@@ -142,6 +143,7 @@ export default function Home() {
                 setAnchorSnapshot(null);
                 setAlignmentOverview(null);
                 setWeeklyAlignmentTrend(null);
+                setAnchorEffect(null);
                 const [profileRes, goalsRes, treeRes] = await Promise.allSettled([
                     api.get('/onboarding/status'),
                     api.get('/goals'),
@@ -158,14 +160,16 @@ export default function Home() {
                 if (treeRes.status === 'fulfilled') setGoalTree(treeRes.value.data.tree || []);
             }
 
-            const [tasksRes, currentRes, retroRes] = await Promise.allSettled([
+            const [tasksRes, currentRes, retroRes, effectRes] = await Promise.allSettled([
                 api.get('/tasks/list'),
                 api.get('/tasks/current'),
-                api.get('/retrospective', { params: { days: 7 } })
+                api.get('/retrospective', { params: { days: 7 } }),
+                api.get('/anchor/effect')
             ]);
             if (tasksRes.status === 'fulfilled') setTasks(tasksRes.value.data);
             if (currentRes.status === 'fulfilled') setCurrentTask(currentRes.value.data.task);
             if (retroRes.status === 'fulfilled') setRetrospective(retroRes.value.data);
+            if (effectRes.status === 'fulfilled') setAnchorEffect(effectRes.value.data);
         } catch (e) {
             console.error(e);
             setError('加载数据失败');
@@ -278,6 +282,9 @@ export default function Home() {
             setActivateAnchorLoading(true);
             setError(null);
             const res = await api.post('/anchor/activate', { force: false });
+            if (res.data?.effect) {
+                setAnchorEffect(res.data.effect);
+            }
             if (res.data?.status === 'noop') {
                 setError('Anchor 内容无变化，无需激活');
             }
@@ -304,6 +311,12 @@ export default function Home() {
     );
     const anchorDiffStatus = anchorDiff?.diff?.status || null;
     const canActivateAnchor = anchorDiffStatus === 'new' || anchorDiffStatus === 'changed';
+    const effectBeforeAvg = Number(anchorEffect?.before?.avg_score);
+    const effectAfterAvg = Number(anchorEffect?.after?.avg_score);
+    const hasEffectDelta = Number.isFinite(effectBeforeAvg) && Number.isFinite(effectAfterAvg);
+    const effectDeltaLabel = hasEffectDelta
+        ? `${effectAfterAvg - effectBeforeAvg >= 0 ? '+' : ''}${(effectAfterAvg - effectBeforeAvg).toFixed(1)}`
+        : '--';
 
     if (loading) {
         return (
@@ -428,6 +441,29 @@ export default function Home() {
                         <div style={{ marginTop: '0.6rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                             {weeklyAlignmentTrend?.summary || '暂无周对齐趋势数据'}
                         </div>
+                        {anchorEffect?.available && (
+                            <div
+                                style={{
+                                    marginTop: '0.6rem',
+                                    border: '1px solid rgba(59, 130, 246, 0.35)',
+                                    background: 'rgba(59, 130, 246, 0.12)',
+                                    borderRadius: '8px',
+                                    padding: '0.55rem 0.65rem',
+                                    fontSize: '0.78rem',
+                                    color: '#bfdbfe'
+                                }}
+                            >
+                                <div>
+                                    最近一次生效: 影响 {anchorEffect.affected_count ?? 0}/{anchorEffect.total_processed ?? 0} 个目标，平均分变化 {effectDeltaLabel}
+                                </div>
+                                {anchorEffect.anchor_version && (
+                                    <div style={{ marginTop: '0.2rem', color: 'var(--text-secondary)' }}>
+                                        Anchor 版本: {anchorEffect.anchor_version}
+                                        {anchorEffect.generated_at ? ` · ${anchorEffect.generated_at}` : ''}
+                                    </div>
+                                )}
+                            </div>
+                        )}
                         <div style={{ marginTop: '0.7rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                             <button
                                 type="button"

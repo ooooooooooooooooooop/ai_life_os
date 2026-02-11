@@ -36,8 +36,5 @@ dist/
 .taskflow/
 archive/
 superpowers/
-tests/
-test_*.py
 plan.md
 todo.md
-

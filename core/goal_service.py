@@ -220,6 +220,63 @@ class GoalService:
             "distribution": distribution,
         }
 
+    @staticmethod
+    def _alignment_projection(node: ObjectiveNode) -> Dict[str, Any]:
+        return {
+            "anchor_version": node.anchor_version,
+            "alignment_score": node.alignment_score,
+            "alignment_level": node.alignment_level,
+            "alignment_reasons": list(node.alignment_reasons or []),
+            "matched_commitments": list(node.matched_commitments or []),
+            "matched_anti_values": list(node.matched_anti_values or []),
+        }
+
+    def recompute_active_alignment(self, detail_limit: int = 50) -> Dict[str, Any]:
+        """
+        Recompute alignment for active OBJECTIVE/GOAL nodes after anchor switch.
+        """
+        targets = [
+            node
+            for node in self.list_nodes()
+            if node.state == GoalState.ACTIVE
+            and node.layer in (GoalLayer.OBJECTIVE, GoalLayer.GOAL)
+        ]
+        before_summary = self.summarize_alignment(targets)
+        impacted: List[Dict[str, Any]] = []
+
+        for node in targets:
+            before = self._alignment_projection(node)
+            self._apply_anchor_alignment(node)
+            after = self._alignment_projection(node)
+            if before != after:
+                node.updated_at = datetime.now().isoformat()
+                self.registry.update_node(node)
+                impacted.append(
+                    {
+                        "goal_id": node.id,
+                        "title": node.title,
+                        "layer": node.layer.value,
+                        "before": before,
+                        "after": after,
+                    }
+                )
+
+        after_summary = self.summarize_alignment(targets)
+        before_avg = before_summary.get("avg_score")
+        after_avg = after_summary.get("avg_score")
+        avg_delta = None
+        if isinstance(before_avg, (int, float)) and isinstance(after_avg, (int, float)):
+            avg_delta = round(float(after_avg) - float(before_avg), 1)
+
+        return {
+            "total_processed": len(targets),
+            "affected_count": len(impacted),
+            "avg_score_delta": avg_delta,
+            "before": before_summary,
+            "after": after_summary,
+            "impacted_goals": impacted[: max(0, detail_limit)],
+        }
+
     # ---------------------------------------------------------------------
     # Serialization helpers
     # ---------------------------------------------------------------------
