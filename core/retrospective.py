@@ -493,6 +493,99 @@ def _guardian_alignment(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"deviated": deviated, "summary": summary}
 
 
+def _goal_alignment_trend(events: List[Dict[str, Any]], days: int) -> Dict[str, Any]:
+    """
+    Build a weekly trend view for goal-anchor alignment.
+    """
+    try:
+        from core.objective_engine.registry import GoalRegistry
+
+        registry = GoalRegistry()
+        nodes = registry.visions + registry.objectives + registry.goals
+        score_by_goal_id = {
+            node.id: float(node.alignment_score)
+            for node in nodes
+            if isinstance(node.alignment_score, (int, float))
+        }
+        anchor_versions = [
+            node.anchor_version for node in nodes if getattr(node, "anchor_version", None)
+        ]
+    except Exception:
+        score_by_goal_id = {}
+        anchor_versions = []
+
+    day_keys = [
+        (datetime.now() - timedelta(days=offset)).strftime("%Y-%m-%d")
+        for offset in reversed(range(days))
+    ]
+    daily_samples: Dict[str, List[float]] = {key: [] for key in day_keys}
+
+    tracked_event_types = {
+        "goal_action",
+        "goal_feedback",
+        "goal_completed",
+        "goal_registry_created",
+        "goal_registry_updated",
+        "goal_registry_confirmed",
+    }
+    seen = set()
+    for event in events:
+        event_type = event.get("type")
+        if event_type not in tracked_event_types:
+            continue
+        event_time = _parse_event_time(event)
+        if event_time is None:
+            continue
+        day = event_time.strftime("%Y-%m-%d")
+        if day not in daily_samples:
+            continue
+
+        goal_id = str(event.get("goal_id") or "")
+        score = score_by_goal_id.get(goal_id)
+        if score is None:
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            node = payload.get("node") if isinstance(payload.get("node"), dict) else {}
+            raw_score = node.get("alignment_score")
+            if isinstance(raw_score, (int, float)):
+                score = float(raw_score)
+        if score is None:
+            continue
+
+        dedupe_key = (event.get("event_id"), day, goal_id, score)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        daily_samples[day].append(score)
+
+    points = []
+    valid_points = []
+    for day in day_keys:
+        samples = daily_samples[day]
+        avg_score = round(sum(samples) / len(samples), 1) if samples else None
+        point = {"date": day, "avg_score": avg_score, "samples": len(samples)}
+        points.append(point)
+        if avg_score is not None:
+            valid_points.append(point)
+
+    if len(valid_points) < 2:
+        trend_summary = "暂无可计算的目标对齐趋势。"
+    else:
+        delta = valid_points[-1]["avg_score"] - valid_points[0]["avg_score"]
+        if delta >= 8:
+            trend_summary = "目标对齐趋势在改善。"
+        elif delta <= -8:
+            trend_summary = "目标对齐趋势在下降，建议复核近期目标。"
+        else:
+            trend_summary = "目标对齐趋势整体稳定。"
+
+    return {
+        "available": bool(valid_points),
+        "summary": trend_summary,
+        "points": points,
+        "active_anchor_version": anchor_versions[-1] if anchor_versions else None,
+    }
+
+
 def _guardian_friction(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     """行为摩擦点：反复 skip、延迟信号。数据来源：task_updated (SKIPPED)、failure 信号。"""
     skip_count = 0
@@ -557,6 +650,7 @@ def generate_guardian_retrospective(days: int = 7) -> Dict[str, Any]:
 
     rhythm = _guardian_rhythm(events, days)
     alignment = _guardian_alignment(events)
+    alignment["trend"] = _goal_alignment_trend(events, days)
     friction = _guardian_friction(events)
     deviation_signals = _detect_deviation_signals(events, days)
     observations = _guardian_observations(rhythm, alignment, friction, deviation_signals)

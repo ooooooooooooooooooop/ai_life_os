@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from core.blueprint_anchor import AnchorManager
 from core.event_sourcing import EVENT_LOG_PATH, EVENT_SCHEMA_VERSION, append_event
 from core.feedback_classifier import classify_feedback
 from core.goal_service import GoalService
@@ -138,6 +139,8 @@ async def get_state():
                 "tasks",
                 "goal_registry",
                 "event_log.review_due",
+                "anchor.current",
+                "retrospective.alignment.trend",
             ],
             "decision_reason": {
                 "trigger": "State requested by API client",
@@ -150,6 +153,27 @@ async def get_state():
     )
     retrospective = build_guardian_retrospective_response(days=7)
     guardian_state = system_state.get("guardian") or {}
+    alignment_summary = service.summarize_alignment(registry.objectives + registry.goals)
+    alignment_trend = (retrospective.get("alignment") or {}).get("trend", {})
+    anchor_snapshot = {
+        "active": False,
+        "version": None,
+        "created_at": None,
+        "commitments_count": 0,
+        "anti_values_count": 0,
+    }
+    try:
+        anchor = AnchorManager().get_current()
+        if anchor:
+            anchor_snapshot = {
+                "active": True,
+                "version": anchor.version,
+                "created_at": anchor.created_at,
+                "commitments_count": len(anchor.long_horizon_commitments or ()),
+                "anti_values_count": len(anchor.anti_values or ()),
+            }
+    except Exception:
+        pass
 
     return {
         "identity": identity,
@@ -169,6 +193,11 @@ async def get_state():
             "queue_load": len(active_tasks),
         },
         "weekly_review_due": _has_review_due_this_week(),
+        "anchor": anchor_snapshot,
+        "alignment": {
+            "goal_summary": alignment_summary,
+            "weekly_trend": alignment_trend,
+        },
         "guardian": {
             "intervention_level": retrospective.get("intervention_level"),
             "pending_confirmation": bool(retrospective.get("require_confirm")),

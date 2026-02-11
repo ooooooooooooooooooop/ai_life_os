@@ -10,6 +10,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.blueprint import Blueprint
+from core.blueprint_anchor import AnchorManager
 from core.event_sourcing import append_event, rebuild_state
 from core.goal_generator import GoalGenerator
 from core.models import Goal as DecompositionGoal
@@ -24,6 +25,10 @@ class GoalService:
 
     def __init__(self, registry: Optional[GoalRegistry] = None):
         self.registry = registry or GoalRegistry()
+        try:
+            self.anchor_manager: Optional[AnchorManager] = AnchorManager()
+        except Exception:
+            self.anchor_manager = None
 
     # ---------------------------------------------------------------------
     # Mapping helpers
@@ -95,6 +100,125 @@ class GoalService:
         if layer == GoalLayer.OBJECTIVE:
             return GoalLayer.GOAL
         return GoalLayer.GOAL
+
+    @staticmethod
+    def _normalize_anchor_text(value: str) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+    @staticmethod
+    def _anchor_level_from_score(score: Optional[float]) -> str:
+        if score is None:
+            return "unknown"
+        if score >= 70:
+            return "high"
+        if score >= 40:
+            return "medium"
+        return "low"
+
+    def _anchor_item_matches(self, text: str, items: Tuple[str, ...]) -> List[str]:
+        matches: List[str] = []
+        for item in items:
+            normalized_item = self._normalize_anchor_text(item)
+            if not normalized_item:
+                continue
+            if normalized_item in text:
+                matches.append(item)
+                continue
+            # Fallback token matching for long phrases.
+            tokens = re.findall(r"[a-z0-9\u4e00-\u9fff]{2,}", normalized_item)
+            if tokens and any(token in text for token in tokens):
+                matches.append(item)
+        return matches
+
+    def _compute_anchor_alignment(self, title: str, description: str) -> Dict[str, Any]:
+        default = {
+            "anchor_version": None,
+            "alignment_score": None,
+            "alignment_level": "unknown",
+            "alignment_reasons": ["No active anchor"],
+            "matched_commitments": [],
+            "matched_anti_values": [],
+        }
+        if not self.anchor_manager:
+            return default
+
+        anchor = self.anchor_manager.get_current()
+        if not anchor:
+            return default
+
+        text = self._normalize_anchor_text(f"{title or ''} {description or ''}")
+        commitments = tuple(anchor.long_horizon_commitments or ())
+        anti_values = tuple(anchor.anti_values or ())
+        if not commitments and not anti_values:
+            return {
+                "anchor_version": getattr(anchor, "version", None),
+                "alignment_score": None,
+                "alignment_level": "unknown",
+                "alignment_reasons": ["Anchor has no commitments or anti-values"],
+                "matched_commitments": [],
+                "matched_anti_values": [],
+            }
+        matched_commitments = self._anchor_item_matches(text, commitments)
+        matched_anti_values = self._anchor_item_matches(text, anti_values)
+
+        commitment_ratio = (
+            len(matched_commitments) / len(commitments) if commitments else 0.0
+        )
+        anti_ratio = len(matched_anti_values) / len(anti_values) if anti_values else 0.0
+
+        score = max(0.0, min(100.0, (commitment_ratio * 100.0) - (anti_ratio * 40.0)))
+        score = round(score, 1)
+        level = self._anchor_level_from_score(score)
+
+        reasons: List[str] = []
+        if matched_commitments:
+            reasons.append(f"Matched commitments: {len(matched_commitments)}")
+        if matched_anti_values:
+            reasons.append(f"Matched anti-values: {len(matched_anti_values)}")
+        if not reasons:
+            reasons.append("No direct anchor phrase match")
+
+        return {
+            "anchor_version": getattr(anchor, "version", None),
+            "alignment_score": score,
+            "alignment_level": level,
+            "alignment_reasons": reasons,
+            "matched_commitments": matched_commitments,
+            "matched_anti_values": matched_anti_values,
+        }
+
+    def _apply_anchor_alignment(self, node: ObjectiveNode) -> None:
+        alignment = self._compute_anchor_alignment(node.title, node.description)
+        node.anchor_version = alignment["anchor_version"]
+        node.alignment_score = alignment["alignment_score"]
+        node.alignment_level = alignment["alignment_level"]
+        node.alignment_reasons = alignment["alignment_reasons"]
+        node.matched_commitments = alignment["matched_commitments"]
+        node.matched_anti_values = alignment["matched_anti_values"]
+
+    def summarize_alignment(
+        self,
+        nodes: Optional[List[ObjectiveNode]] = None,
+    ) -> Dict[str, Any]:
+        sample = nodes if nodes is not None else self.list_nodes()
+        sample = [
+            node
+            for node in sample
+            if node.state == GoalState.ACTIVE and node.layer != GoalLayer.VISION
+        ]
+        distribution = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+        scored: List[float] = []
+        for node in sample:
+            level = (node.alignment_level or "unknown").lower()
+            distribution[level if level in distribution else "unknown"] += 1
+            if isinstance(node.alignment_score, (int, float)):
+                scored.append(float(node.alignment_score))
+        avg_score = round(sum(scored) / len(scored), 1) if scored else None
+        return {
+            "total_active": len(sample),
+            "avg_score": avg_score,
+            "distribution": distribution,
+        }
 
     # ---------------------------------------------------------------------
     # Serialization helpers
@@ -222,6 +346,7 @@ class GoalService:
             state=GoalState.ACTIVE,
             source=self.source_from_string(source),
         )
+        self._apply_anchor_alignment(node)
         self.registry.add_node(node)
         self._emit_canonical_event("goal_registry_created", node)
         return node
@@ -250,6 +375,7 @@ class GoalService:
             parent_id=parent_id,
             goal_type=goal_type,
         )
+        self._apply_anchor_alignment(node)
         self.registry.add_node(node)
         self._emit_canonical_event("goal_registry_created", node)
         return node
@@ -265,6 +391,7 @@ class GoalService:
             vision.title = title
         if description:
             vision.description = description
+        self._apply_anchor_alignment(vision)
         vision.updated_at = datetime.now().isoformat()
         self.registry.update_node(vision)
 
@@ -292,6 +419,7 @@ class GoalService:
         node.state = GoalState.ACTIVE
         node.source = self.source_from_string(goal_data.get("source", node.source.value))
         node.parent_id = goal_data.get("parent_id", node.parent_id)
+        self._apply_anchor_alignment(node)
         node.updated_at = datetime.now().isoformat()
 
         if existing:
@@ -312,6 +440,8 @@ class GoalService:
         if strict_pending and node.state != GoalState.VISION_PENDING_CONFIRMATION:
             raise ValueError(f"Goal is not pending confirmation (current: {node.state.value})")
 
+        if node.alignment_level is None or node.alignment_score is None:
+            self._apply_anchor_alignment(node)
         node.state = GoalState.ACTIVE
         node.updated_at = datetime.now().isoformat()
         self.registry.update_node(node)
@@ -504,6 +634,7 @@ class GoalService:
             parent_id=goal_id,
             goal_type=parent.goal_type,
         )
+        self._apply_anchor_alignment(child)
         self.registry.add_node(child)
 
         if child.id not in parent.children_ids:

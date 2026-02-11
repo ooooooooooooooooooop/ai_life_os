@@ -70,6 +70,9 @@ export default function Home() {
     const [viewMode, setViewMode] = useState('execute');
     const [retrospective, setRetrospective] = useState(null);
     const [weeklyReviewDue, setWeeklyReviewDue] = useState(false);
+    const [anchorSnapshot, setAnchorSnapshot] = useState(null);
+    const [alignmentOverview, setAlignmentOverview] = useState(null);
+    const [weeklyAlignmentTrend, setWeeklyAlignmentTrend] = useState(null);
 
     const [skipDialogOpen, setSkipDialogOpen] = useState(false);
     const [skipReason, setSkipReason] = useState('');
@@ -87,6 +90,19 @@ export default function Home() {
         medium: { background: 'rgba(245, 158, 11, 0.2)', color: '#fcd34d', border: '1px solid rgba(245, 158, 11, 0.35)' },
         info: { background: 'rgba(59, 130, 246, 0.2)', color: '#93c5fd', border: '1px solid rgba(59, 130, 246, 0.35)' }
     };
+    const alignmentLevelStyleMap = {
+        high: { color: '#86efac', border: '1px solid rgba(34, 197, 94, 0.4)', background: 'rgba(34, 197, 94, 0.15)' },
+        medium: { color: '#fcd34d', border: '1px solid rgba(245, 158, 11, 0.4)', background: 'rgba(245, 158, 11, 0.15)' },
+        low: { color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.4)', background: 'rgba(239, 68, 68, 0.15)' },
+        unknown: { color: '#cbd5e1', border: '1px solid rgba(148, 163, 184, 0.35)', background: 'rgba(148, 163, 184, 0.12)' }
+    };
+
+    const formatAlignmentLevel = (level) => {
+        if (level === 'high') return '高对齐';
+        if (level === 'medium') return '中对齐';
+        if (level === 'low') return '低对齐';
+        return '待评估';
+    };
 
     useEffect(() => {
         fetchAll();
@@ -101,6 +117,9 @@ export default function Home() {
             if (stateRes?.data) {
                 const s = stateRes.data;
                 setWeeklyReviewDue(Boolean(s.weekly_review_due));
+                setAnchorSnapshot(s.anchor || null);
+                setAlignmentOverview(s.alignment?.goal_summary || null);
+                setWeeklyAlignmentTrend(s.alignment?.weekly_trend || null);
                 if (s.identity) {
                     setProfile({
                         occupation: s.identity.occupation ?? '',
@@ -116,6 +135,9 @@ export default function Home() {
                 });
                 setGoalTree(buildTreeFromState(s.visions || [], s.objectives || [], allGoals));
             } else {
+                setAnchorSnapshot(null);
+                setAlignmentOverview(null);
+                setWeeklyAlignmentTrend(null);
                 const [profileRes, goalsRes, treeRes] = await Promise.allSettled([
                     api.get('/onboarding/status'),
                     api.get('/goals'),
@@ -337,6 +359,35 @@ export default function Home() {
                     <h4 style={{ color: 'var(--accent-color)', marginBottom: '0.75rem', fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: '1px' }}>
                         我的愿景与目标
                     </h4>
+                    <div className="glass-card" style={{ padding: '0.9rem', marginBottom: '0.9rem' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
+                            <div>
+                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>价值对齐视图</div>
+                                <div style={{ marginTop: '0.2rem', fontSize: '0.9rem' }}>
+                                    {anchorSnapshot?.active
+                                        ? `Anchor ${anchorSnapshot.version || ''}`
+                                        : '未激活 Anchor'}
+                                </div>
+                            </div>
+                            <div style={{ display: 'flex', gap: '0.65rem', flexWrap: 'wrap' }}>
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                    平均对齐: {alignmentOverview?.avg_score ?? '--'}
+                                </span>
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                    高 {alignmentOverview?.distribution?.high ?? 0}
+                                </span>
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                    中 {alignmentOverview?.distribution?.medium ?? 0}
+                                </span>
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                    低 {alignmentOverview?.distribution?.low ?? 0}
+                                </span>
+                            </div>
+                        </div>
+                        <div style={{ marginTop: '0.6rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                            {weeklyAlignmentTrend?.summary || '暂无周对齐趋势数据'}
+                        </div>
+                    </div>
 
                     {goalTree.length > 0 ? (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
@@ -357,6 +408,8 @@ export default function Home() {
                                             {vision.children.map((child) => {
                                                 const progress = getGoalProgress(child.id);
                                                 const pct = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+                                                const alignmentLevel = String(child.alignment_level || 'unknown').toLowerCase();
+                                                const alignmentStyle = alignmentLevelStyleMap[alignmentLevel] || alignmentLevelStyleMap.unknown;
                                                 return (
                                                     <div key={child.id} style={{
                                                         background: 'rgba(255,255,255,0.03)',
@@ -368,6 +421,19 @@ export default function Home() {
                                                             <div>
                                                                 <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{child.layer}</div>
                                                                 <div>{child.title}</div>
+                                                                <div style={{ marginTop: '0.25rem' }}>
+                                                                    <span
+                                                                        style={{
+                                                                            ...alignmentStyle,
+                                                                            fontSize: '0.7rem',
+                                                                            borderRadius: '999px',
+                                                                            padding: '0.12rem 0.4rem',
+                                                                            fontWeight: 600
+                                                                        }}
+                                                                    >
+                                                                        {formatAlignmentLevel(alignmentLevel)} {Number.isFinite(child.alignment_score) ? `· ${child.alignment_score}` : ''}
+                                                                    </span>
+                                                                </div>
                                                             </div>
                                                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                                                                 <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{pct}%</span>
@@ -401,6 +467,8 @@ export default function Home() {
                                 {standaloneGoals.map((goal) => {
                                     const progress = getGoalProgress(goal.id);
                                     const pct = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+                                    const alignmentLevel = String(goal.alignment_level || 'unknown').toLowerCase();
+                                    const alignmentStyle = alignmentLevelStyleMap[alignmentLevel] || alignmentLevelStyleMap.unknown;
                                     return (
                                         <div key={goal.id} className="glass-card" style={{ padding: '0.8rem' }}>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -412,6 +480,19 @@ export default function Home() {
                                                 >
                                                     ×
                                                 </button>
+                                            </div>
+                                            <div style={{ marginTop: '0.35rem' }}>
+                                                <span
+                                                    style={{
+                                                        ...alignmentStyle,
+                                                        fontSize: '0.7rem',
+                                                        borderRadius: '999px',
+                                                        padding: '0.12rem 0.4rem',
+                                                        fontWeight: 600
+                                                    }}
+                                                >
+                                                    {formatAlignmentLevel(alignmentLevel)} {Number.isFinite(goal.alignment_score) ? `· ${goal.alignment_score}` : ''}
+                                                </span>
                                             </div>
                                             <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{progress.completed}/{progress.total} 任务 · {pct}%</div>
                                         </div>
