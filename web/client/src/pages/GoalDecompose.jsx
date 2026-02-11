@@ -101,7 +101,7 @@ export default function GoalDecompose() {
             if (res.data.success) {
                 if (res.data.tasks_created > 0) {
                     navigate('/');
-                } else if (res.data.goal.horizon === 'goal') {
+                } else if (res.data.goal.layer === 'goal') {
                     // 如果还在 goal 层级，可能继续分解？或者假设 3 层结束
                     // 根据后端逻辑，如果创建的是 goal，就会尝试分解成 tasks
                     // 如果这里 tasks_created=0，说明可能要手动分解？
@@ -237,7 +237,7 @@ export default function GoalDecompose() {
                 <>
                     <h2 style={{ marginBottom: '0.5rem' }}>选择路径</h2>
                     <p style={{ color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>
-                        基于你的回答，AI 推荐以下 {optionsData.horizon === 'milestone' ? '里程碑阶段' : '具体目标'}。
+                        基于你的回答，AI 推荐以下 {optionsData.layer === 'objective' ? '里程碑阶段' : '具体目标'}。
                     </p>
                     <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem', marginBottom: '2rem' }}>
                         选择一项或填写下方「其他」。

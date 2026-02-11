@@ -1,6 +1,5 @@
 import asyncio
 import json
-from dataclasses import asdict
 from datetime import datetime
 from typing import Optional
 
@@ -112,31 +111,19 @@ async def get_state():
     system_state = steward.state
     registry = steward.registry
 
-    identity = system_state.get("identity")
-    if not identity and system_state.get("profile") is not None:
-        profile = system_state["profile"]
-        identity = dict(profile if isinstance(profile, dict) else profile.__dict__)
-
-    active_tasks = system_state.get("ongoing", {}).get("active_tasks")
-    if active_tasks is None:
-        tasks = system_state.get("tasks", [])
-        active_tasks = [
-            asdict(t)
-            for t in tasks
-            if str(
-                getattr(getattr(t, "status", None), "value", getattr(t, "status", ""))
-            )
-            == "pending"
-        ]
+    identity = system_state.get("identity") or {}
+    active_tasks = [
+        task.__dict__
+        for task in system_state.get("tasks", [])
+        if str(getattr(task.status, "value", task.status)) == "pending"
+    ]
 
     state_audit = _normalized_audit(
         raw_audit={
             "strategy": "state_projection",
             "used_state_fields": [
                 "identity",
-                "profile",
                 "rhythm",
-                "ongoing.active_tasks",
                 "tasks",
                 "goal_registry",
                 "event_log.review_due",
@@ -156,11 +143,11 @@ async def get_state():
         "metrics": system_state.get("rhythm") or {},
         "energy_phase": steward.get_current_phase(),
         "active_tasks": active_tasks,
-        "visions": [service.node_to_dict(v, include_legacy=True) for v in registry.visions],
-        "objectives": [service.node_to_dict(o, include_legacy=True) for o in registry.objectives],
-        "goals": [service.node_to_dict(g, include_legacy=True) for g in registry.goals],
+        "visions": [service.node_to_dict(v) for v in registry.visions],
+        "objectives": [service.node_to_dict(o) for o in registry.objectives],
+        "goals": [service.node_to_dict(g) for g in registry.goals],
         "pending_confirmation": [
-            service.node_to_dict(g, include_legacy=True)
+            service.node_to_dict(g)
             for g in (registry.objectives + registry.goals)
             if g.state == GoalState.VISION_PENDING_CONFIRMATION
         ],
@@ -185,11 +172,7 @@ async def get_retrospective(days: int = 7):
 @router.get("/visions")
 async def list_visions():
     service = get_goal_service()
-    return {
-        "visions": [
-            service.node_to_dict(v, include_legacy=True) for v in service.list_visions()
-        ]
-    }
+    return {"visions": [service.node_to_dict(v) for v in service.list_visions()]}
 
 
 @router.put("/visions/{vision_id}")
@@ -206,7 +189,7 @@ async def update_vision(vision_id: str, request: VisionUpdateRequest):
         if "not found" in message:
             raise HTTPException(status_code=404, detail="Vision not found")
         raise HTTPException(status_code=400, detail=str(exc))
-    return {"status": "success", "vision": service.node_to_dict(vision, include_legacy=True)}
+    return {"status": "success", "vision": service.node_to_dict(vision)}
 
 
 @router.post("/goals/{goal_id}/confirm")
@@ -325,7 +308,7 @@ async def list_goals(state: Optional[str] = None, layer: Optional[str] = None):
     service = get_goal_service()
     all_goals = service.list_nodes(state=state, layer=layer)
     return {
-        "goals": [service.node_to_dict(g, include_legacy=True) for g in all_goals],
+        "goals": [service.node_to_dict(g) for g in all_goals],
         "count": len(all_goals),
     }
 

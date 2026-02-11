@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from core.blueprint import Blueprint
 from core.event_sourcing import append_event, rebuild_state
 from core.goal_generator import GoalGenerator
-from core.models import Goal as LegacyGoal
+from core.models import Goal as DecompositionGoal
 from core.models import GoalStatus, UserProfile
 from core.objective_engine.models import GoalLayer, GoalSource, GoalState, ObjectiveNode
 from core.objective_engine.registry import GoalRegistry
@@ -56,17 +56,16 @@ class GoalService:
             return GoalSource.USER_INPUT
 
     @staticmethod
-    def layer_from_horizon(horizon: Optional[str]) -> GoalLayer:
+    def layer_from_string(layer: Optional[str]) -> GoalLayer:
         mapping = {
             "vision": GoalLayer.VISION,
-            "milestone": GoalLayer.OBJECTIVE,
             "objective": GoalLayer.OBJECTIVE,
             "goal": GoalLayer.GOAL,
         }
-        return mapping.get((horizon or "goal").lower(), GoalLayer.GOAL)
+        return mapping.get((layer or "goal").lower(), GoalLayer.GOAL)
 
     @staticmethod
-    def horizon_from_layer(layer: GoalLayer) -> str:
+    def decomposition_horizon_from_layer(layer: GoalLayer) -> str:
         mapping = {
             GoalLayer.VISION: "vision",
             GoalLayer.OBJECTIVE: "milestone",
@@ -75,30 +74,19 @@ class GoalService:
         return mapping.get(layer, "goal")
 
     @staticmethod
-    def state_from_legacy_status(status: Any) -> GoalState:
-        raw = status.value if hasattr(status, "value") else str(status or "").lower()
+    def state_from_string(state: Optional[str]) -> GoalState:
+        raw = str(state or "").strip().lower()
         mapping = {
-            "pending_confirm": GoalState.VISION_PENDING_CONFIRMATION,
+            "draft": GoalState.DRAFT,
             "active": GoalState.ACTIVE,
+            "vision_pending_confirmation": GoalState.VISION_PENDING_CONFIRMATION,
             "completed": GoalState.COMPLETED,
-            "abandoned": GoalState.ARCHIVED,
             "archived": GoalState.ARCHIVED,
             "blocked": GoalState.BLOCKED,
-            "vision_pending_confirmation": GoalState.VISION_PENDING_CONFIRMATION,
+            "pending_confirm": GoalState.VISION_PENDING_CONFIRMATION,
+            "abandoned": GoalState.ARCHIVED,
         }
         return mapping.get(raw, GoalState.ACTIVE)
-
-    @staticmethod
-    def legacy_status_from_state(state: GoalState) -> str:
-        mapping = {
-            GoalState.VISION_PENDING_CONFIRMATION: GoalStatus.PENDING_CONFIRM.value,
-            GoalState.ACTIVE: GoalStatus.ACTIVE.value,
-            GoalState.COMPLETED: GoalStatus.COMPLETED.value,
-            GoalState.ARCHIVED: GoalStatus.ABANDONED.value,
-            GoalState.BLOCKED: GoalStatus.PENDING_CONFIRM.value,
-            GoalState.DRAFT: GoalStatus.PENDING_CONFIRM.value,
-        }
-        return mapping.get(state, GoalStatus.ACTIVE.value)
 
     @staticmethod
     def next_layer(layer: GoalLayer) -> GoalLayer:
@@ -111,40 +99,39 @@ class GoalService:
     # ---------------------------------------------------------------------
     # Serialization helpers
     # ---------------------------------------------------------------------
-    def node_to_dict(self, node: ObjectiveNode, include_legacy: bool = True) -> Dict[str, Any]:
+    def node_to_dict(self, node: ObjectiveNode) -> Dict[str, Any]:
         data = asdict(node)
         data["layer"] = node.layer.value
         data["state"] = node.state.value
         data["source"] = node.source.value
-        if include_legacy:
-            data["horizon"] = self.horizon_from_layer(node.layer)
-            data["status"] = self.legacy_status_from_state(node.state)
-            data.setdefault("depends_on", [])
-            data.setdefault("tags", [])
-            data.setdefault("resource_description", "")
-            data.setdefault("target_level", "")
         return data
 
-    def node_to_legacy_goal(
+    def _node_to_decomposition_goal(
         self,
         node: ObjectiveNode,
         extras: Optional[Dict[str, Any]] = None,
-    ) -> LegacyGoal:
+    ) -> DecompositionGoal:
         extras = extras or {}
-        status_value = self.legacy_status_from_state(node.state)
+        status_value = GoalStatus.ACTIVE.value
+        if node.state == GoalState.VISION_PENDING_CONFIRMATION:
+            status_value = GoalStatus.PENDING_CONFIRM.value
+        elif node.state == GoalState.COMPLETED:
+            status_value = GoalStatus.COMPLETED.value
+        elif node.state == GoalState.ARCHIVED:
+            status_value = GoalStatus.ABANDONED.value
         try:
             status = GoalStatus(status_value)
         except ValueError:
             status = GoalStatus.ACTIVE
 
-        return LegacyGoal(
+        return DecompositionGoal(
             id=node.id,
             title=extras.get("title", node.title),
             description=extras.get("description", node.description),
             source=extras.get("source", node.source.value),
             status=status,
             parent_id=node.parent_id,
-            horizon=self.horizon_from_layer(node.layer),
+            horizon=self.decomposition_horizon_from_layer(node.layer),
             depends_on=extras.get("depends_on", []),
             resource_description=extras.get("resource_description", ""),
             target_level=extras.get("target_level", ""),
@@ -165,7 +152,7 @@ class GoalService:
                 "type": event_type,
                 "goal_id": node.id,
                 "timestamp": datetime.now().isoformat(),
-                "payload": payload or {"node": self.node_to_dict(node, include_legacy=True)},
+                "payload": payload or {"node": self.node_to_dict(node)},
             }
         )
 
@@ -211,7 +198,7 @@ class GoalService:
         def build(parent_id: Optional[str]) -> List[Dict[str, Any]]:
             children = []
             for item in by_parent.get(parent_id, []):
-                d = self.node_to_dict(item, include_legacy=True)
+                d = self.node_to_dict(item)
                 d["children"] = build(item.id)
                 children.append(d)
             return children
@@ -287,12 +274,13 @@ class GoalService:
     def confirm_candidate_goal(self, goal_data: Dict[str, Any]) -> Tuple[ObjectiveNode, int]:
         goal_id = goal_data.get("id") or self._new_id("g")
         existing = self.get_node(goal_id)
+        layer = self.layer_from_string(goal_data.get("layer"))
 
         node = existing or ObjectiveNode(
             id=goal_id,
             title=goal_data.get("title", "Untitled Goal"),
             description=goal_data.get("description", ""),
-            layer=self.layer_from_horizon(goal_data.get("horizon", "goal")),
+            layer=layer,
             state=GoalState.ACTIVE,
             source=self.source_from_string(goal_data.get("source", "ai_generated")),
             parent_id=goal_data.get("parent_id"),
@@ -300,9 +288,7 @@ class GoalService:
 
         node.title = goal_data.get("title", node.title)
         node.description = goal_data.get("description", node.description)
-        node.layer = self.layer_from_horizon(
-            goal_data.get("horizon", self.horizon_from_layer(node.layer))
-        )
+        node.layer = self.layer_from_string(goal_data.get("layer", node.layer.value))
         node.state = GoalState.ACTIVE
         node.source = self.source_from_string(goal_data.get("source", node.source.value))
         node.parent_id = goal_data.get("parent_id", node.parent_id)
@@ -315,8 +301,10 @@ class GoalService:
             self.registry.add_node(node)
             self._emit_canonical_event("goal_registry_created", node)
 
-        legacy_goal = self.node_to_legacy_goal(node, goal_data)
-        tasks_created = self._decompose_to_tasks(legacy_goal)
+        tasks_created = 0
+        if node.layer == GoalLayer.GOAL:
+            decomposed = self._node_to_decomposition_goal(node, goal_data)
+            tasks_created = self._decompose_to_tasks(decomposed)
         return node, tasks_created
 
     def confirm_goal(self, goal_id: str, strict_pending: bool = True) -> ObjectiveNode:
@@ -417,9 +405,19 @@ class GoalService:
 
         result = []
         for goal, score in candidates:
-            item = goal.__dict__.copy()
-            item["_score"] = score.score
-            result.append(item)
+            result.append(
+                {
+                    "id": goal.id,
+                    "title": goal.title,
+                    "description": goal.description,
+                    "layer": GoalLayer.GOAL.value,
+                    "source": goal.source,
+                    "resource_description": goal.resource_description,
+                    "target_level": goal.target_level,
+                    "tags": goal.tags,
+                    "_score": score.score,
+                }
+            )
         return result
 
     def get_decomposition_questions(self, goal_id: str) -> List[Dict[str, Any]]:
@@ -430,7 +428,10 @@ class GoalService:
 
         parent = self.require_node(goal_id)
         generator = GoalGenerator(Blueprint())
-        return generator.get_feasibility_questions(self.node_to_legacy_goal(parent), profile)
+        return generator.get_feasibility_questions(
+            self._node_to_decomposition_goal(parent),
+            profile,
+        )
 
     def get_decomposition_options(
         self, goal_id: str, context: Optional[Dict[str, Any]] = None, n: int = 3
@@ -450,7 +451,7 @@ class GoalService:
 
         generator = GoalGenerator(Blueprint())
         candidates = generator.decompose_to_children(
-            self.node_to_legacy_goal(parent),
+            self._node_to_decomposition_goal(parent),
             profile,
             n=n,
             context=context,
@@ -460,7 +461,6 @@ class GoalService:
         return {
             "action": "choose_option",
             "candidates": candidates,
-            "horizon": self.horizon_from_layer(child_layer),
             "layer": child_layer.value,
         }
 
@@ -516,7 +516,7 @@ class GoalService:
 
         tasks_created = 0
         if child.layer == GoalLayer.GOAL:
-            tasks_created = self._decompose_to_tasks(self.node_to_legacy_goal(child))
+            tasks_created = self._decompose_to_tasks(self._node_to_decomposition_goal(child))
 
         return child, tasks_created, False
 
@@ -525,7 +525,7 @@ class GoalService:
         pattern = r"^(?:Option|选项)\s*[0-9a-zA-Z一二三四五六七八九十IVXLCDM]+[:：\s\-\.]*"
         return re.sub(pattern, "", str(title or ""), flags=re.IGNORECASE).strip()
 
-    def _decompose_to_tasks(self, goal: LegacyGoal) -> int:
+    def _decompose_to_tasks(self, goal: DecompositionGoal) -> int:
         decomposer = TaskDecomposer()
         tasks = decomposer.decompose_goal(goal, start_date=date.today())
         for task in tasks:

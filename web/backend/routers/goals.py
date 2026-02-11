@@ -63,23 +63,6 @@ def confirm_goal(req: ConfirmRequest):
     }
 
 
-@router.get("/list")
-def list_goals():
-    service = get_goal_service()
-    all_nodes = service.list_nodes()
-    active = [
-        service.node_to_dict(n, include_legacy=True)
-        for n in all_nodes
-        if n.state.value == "active"
-    ]
-    completed = [
-        service.node_to_dict(n, include_legacy=True)
-        for n in all_nodes
-        if n.state.value == "completed"
-    ]
-    return {"active": active, "completed": completed}
-
-
 class VisionRequest(BaseModel):
     title: str
     description: str = ""
@@ -127,7 +110,7 @@ def decompose_goal(goal_id: str, req: Optional[DecomposeRequest] = None):
             custom_input=req.custom_input,
         )
 
-        payload = service.node_to_dict(child, include_legacy=True)
+        payload = service.node_to_dict(child)
         response = {
             "success": True,
             "goal": payload,

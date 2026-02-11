@@ -2,10 +2,9 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../utils/api';
 
-// 从 /state 的 visions/objectives/goals 构建与 /goals/tree 兼容的树形结构
+// 从 /state 的 visions/objectives/goals 构建树形结构
 function buildTreeFromState(visions = [], objectives = [], goals = []) {
-    const layerToHorizon = (layer) => (layer === 'vision' ? 'vision' : layer === 'objective' ? 'milestone' : 'goal');
-    const node = (n) => ({ ...n, horizon: layerToHorizon(n.layer), children: [] });
+    const node = (n) => ({ ...n, children: [] });
     const byParent = (list, parentId) => list.filter((x) => (x.parent_id || null) === parentId);
 
     const trees = [];
@@ -69,10 +68,7 @@ export default function Home() {
                         ...s.identity
                     });
                 }
-                const allGoals = (s.goals || []).map((g) => ({
-                    ...g,
-                    horizon: g.layer === 'vision' ? 'vision' : g.layer === 'objective' ? 'milestone' : 'goal'
-                }));
+                const allGoals = s.goals || [];
                 setGoals({
                     active: allGoals.filter((g) => g.state === 'active'),
                     completed: allGoals.filter((g) => g.state === 'completed')
@@ -81,11 +77,17 @@ export default function Home() {
             } else {
                 const [profileRes, goalsRes, treeRes] = await Promise.allSettled([
                     api.get('/onboarding/status'),
-                    api.get('/goals/list'),
+                    api.get('/goals'),
                     api.get('/goals/tree')
                 ]);
                 if (profileRes.status === 'fulfilled') setProfile(profileRes.value.data.profile);
-                if (goalsRes.status === 'fulfilled') setGoals(goalsRes.value.data);
+                if (goalsRes.status === 'fulfilled') {
+                    const nodes = goalsRes.value.data.goals || [];
+                    setGoals({
+                        active: nodes.filter((g) => g.state === 'active'),
+                        completed: nodes.filter((g) => g.state === 'completed')
+                    });
+                }
                 if (treeRes.status === 'fulfilled') setGoalTree(treeRes.value.data.tree || []);
             }
 
@@ -296,7 +298,7 @@ export default function Home() {
                 {/* 愿景树形展示 */}
                 {goalTree.length > 0 ? (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-                        {goalTree.filter(v => v.horizon === 'vision').map(vision => (
+                        {goalTree.filter(v => v.layer === 'vision').map(vision => (
                             <div key={vision.id} className="glass-card" style={{ padding: '1.25rem', borderLeft: '4px solid #f59e0b' }}>
                                 {/* 愿景标题 */}
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
@@ -310,9 +312,9 @@ export default function Home() {
                                 </div>
 
                                 {/* 里程碑 */}
-                                {vision.children?.filter(m => m.horizon === 'milestone').length > 0 && (
+                                {vision.children?.filter(m => m.layer === 'objective').length > 0 && (
                                     <div style={{ marginLeft: '1rem', borderLeft: '2px solid rgba(139, 92, 246, 0.3)', paddingLeft: '1rem' }}>
-                                        {vision.children.filter(m => m.horizon === 'milestone').map(milestone => (
+                                        {vision.children.filter(m => m.layer === 'objective').map(milestone => (
                                             <div key={milestone.id} style={{ marginBottom: '1rem' }}>
                                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                                                     <div>
@@ -325,9 +327,9 @@ export default function Home() {
                                                 </div>
 
                                                 {/* 目标 */}
-                                                {milestone.children?.filter(g => g.horizon === 'goal').length > 0 && (
+                                                {milestone.children?.filter(g => g.layer === 'goal').length > 0 && (
                                                     <div style={{ marginLeft: '1rem', marginTop: '0.5rem', display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                                                        {milestone.children.filter(g => g.horizon === 'goal').map(goal => {
+                                                        {milestone.children.filter(g => g.layer === 'goal').map(goal => {
                                                             const progress = getGoalProgress(goal.id);
                                                             const pct = progress.total > 0 ? Math.round(progress.completed / progress.total * 100) : 0;
                                                             return (
@@ -367,9 +369,9 @@ export default function Home() {
                                 )}
 
                                 {/* 直接挂在愿景下的目标（无里程碑） */}
-                                {vision.children?.filter(g => g.horizon === 'goal').length > 0 && (
+                                {vision.children?.filter(g => g.layer === 'goal').length > 0 && (
                                     <div style={{ marginLeft: '1rem', marginTop: '0.5rem', display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                                        {vision.children.filter(g => g.horizon === 'goal').map(goal => {
+                                        {vision.children.filter(g => g.layer === 'goal').map(goal => {
                                             const progress = getGoalProgress(goal.id);
                                             const pct = progress.total > 0 ? Math.round(progress.completed / progress.total * 100) : 0;
                                             return (
@@ -397,11 +399,11 @@ export default function Home() {
                 )}
 
                 {/* 独立目标（没有挂在愿景下的） */}
-                {goals.active?.filter(g => !g.parent_id && g.horizon !== 'vision').length > 0 && (
+                {goals.active?.filter(g => !g.parent_id && g.layer !== 'vision').length > 0 && (
                     <div style={{ marginTop: '1.5rem' }}>
                         <h5 style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', marginBottom: '0.75rem' }}>📋 独立目标</h5>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '0.75rem' }}>
-                            {goals.active.filter(g => !g.parent_id && g.horizon !== 'vision').map(goal => {
+                            {goals.active.filter(g => !g.parent_id && g.layer !== 'vision').map(goal => {
                                 const progress = getGoalProgress(goal.id);
                                 const pct = progress.total > 0 ? Math.round(progress.completed / progress.total * 100) : 0;
                                 return (
