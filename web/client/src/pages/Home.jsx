@@ -58,6 +58,41 @@ function OverlayModal({ open, title, children, onCancel, onConfirm, confirmText,
     );
 }
 
+function extractApiErrorDetail(error) {
+    if (typeof error?.response?.data?.detail === 'string' && error.response.data.detail.trim()) {
+        return error.response.data.detail.trim();
+    }
+    if (typeof error?.message === 'string' && error.message.trim()) {
+        return error.message.trim();
+    }
+    return 'unknown_error';
+}
+
+async function copyTextToClipboard(text) {
+    if (typeof navigator !== 'undefined' && navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+    }
+    if (typeof document === 'undefined') {
+        throw new Error('clipboard_unavailable');
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    textarea.style.pointerEvents = 'none';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+
+    const copied = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    if (!copied) {
+        throw new Error('clipboard_unavailable');
+    }
+}
+
 export default function Home() {
     const [profile, setProfile] = useState(null);
     const [goals, setGoals] = useState({ active: [], completed: [] });
@@ -92,11 +127,18 @@ export default function Home() {
     const [guardianConfigSavedAt, setGuardianConfigSavedAt] = useState(null);
     const [guardianAutotuneConfig, setGuardianAutotuneConfig] = useState(null);
     const [guardianAutotuneLifecycle, setGuardianAutotuneLifecycle] = useState(null);
+    const [guardianAutotuneHistory, setGuardianAutotuneHistory] = useState([]);
+    const [guardianAutotuneMetrics, setGuardianAutotuneMetrics] = useState(null);
+    const [guardianAutotuneEvalLogs, setGuardianAutotuneEvalLogs] = useState([]);
     const [guardianAutotuneLoading, setGuardianAutotuneLoading] = useState(false);
     const [guardianAutotuneSaving, setGuardianAutotuneSaving] = useState(false);
     const [guardianAutotuneDirty, setGuardianAutotuneDirty] = useState(false);
     const [guardianAutotuneSavedAt, setGuardianAutotuneSavedAt] = useState(null);
     const [guardianAutotuneActionLoading, setGuardianAutotuneActionLoading] = useState(false);
+    const [guardianAutotuneRetryLogKey, setGuardianAutotuneRetryLogKey] = useState(null);
+    const [guardianAutotuneExpandedLogMap, setGuardianAutotuneExpandedLogMap] = useState({});
+    const [guardianAutotuneRetryResult, setGuardianAutotuneRetryResult] = useState(null);
+    const [guardianAutotuneRetryCopiedKey, setGuardianAutotuneRetryCopiedKey] = useState(null);
     const [l2SessionActionLoading, setL2SessionActionLoading] = useState(false);
     const [l2InterruptReason, setL2InterruptReason] = useState('context_switch');
     const [l2StartIntention, setL2StartIntention] = useState('');
@@ -138,6 +180,13 @@ export default function Home() {
         balanced: '支持/覆盖平衡',
         override_heavy: '覆盖优先',
         insufficient_data: '数据不足'
+    };
+    const autotuneStatusLabelMap = {
+        proposed: '已提议',
+        reviewed: '已审阅',
+        applied: '已应用',
+        rejected: '已拒绝',
+        rolled_back: '已回滚'
     };
     const responseContextOptions = [
         { value: 'recovering', label: '恢复精力' },
@@ -239,6 +288,9 @@ export default function Home() {
                 setGuardianConfig(null);
                 setGuardianAutotuneConfig(null);
                 setGuardianAutotuneLifecycle(null);
+                setGuardianAutotuneHistory([]);
+                setGuardianAutotuneMetrics(null);
+                setGuardianAutotuneEvalLogs([]);
                 const [profileRes, goalsRes, treeRes] = await Promise.allSettled([
                     api.get('/onboarding/status'),
                     api.get('/goals'),
@@ -255,13 +307,24 @@ export default function Home() {
                 if (treeRes.status === 'fulfilled') setGoalTree(treeRes.value.data.tree || []);
             }
 
-            const [tasksRes, currentRes, retroRes, effectRes, guardianConfigRes, autotuneLifecycleRes] = await Promise.allSettled([
+            const [
+                tasksRes,
+                currentRes,
+                retroRes,
+                effectRes,
+                guardianConfigRes,
+                autotuneLifecycleRes,
+                autotuneHistoryRes,
+                autotuneEvalLogsRes
+            ] = await Promise.allSettled([
                 api.get('/tasks/list'),
                 api.get('/tasks/current'),
                 api.get('/retrospective', { params: { days: 7 } }),
                 api.get('/anchor/effect'),
                 api.get('/guardian/config'),
-                api.get('/guardian/autotune/lifecycle/latest')
+                api.get('/guardian/autotune/lifecycle/latest'),
+                api.get('/guardian/autotune/lifecycle/history', { params: { days: 14, limit: 12 } }),
+                api.get('/guardian/autotune/evaluation/logs', { params: { days: 14, limit: 8 } })
             ]);
             if (tasksRes.status === 'fulfilled') setTasks(tasksRes.value.data);
             if (currentRes.status === 'fulfilled') setCurrentTask(currentRes.value.data.task);
@@ -279,6 +342,15 @@ export default function Home() {
                     lifecycle: payload.lifecycle || {}
                 });
                 setGuardianAutotuneDirty(false);
+            }
+            if (autotuneHistoryRes.status === 'fulfilled') {
+                const historyPayload = autotuneHistoryRes.value.data || {};
+                setGuardianAutotuneHistory(historyPayload.history || []);
+                setGuardianAutotuneMetrics(historyPayload.metrics || null);
+            }
+            if (autotuneEvalLogsRes.status === 'fulfilled') {
+                const evalLogPayload = autotuneEvalLogsRes.value.data || {};
+                setGuardianAutotuneEvalLogs(evalLogPayload.logs || []);
             }
         } catch (e) {
             console.error(e);
@@ -588,13 +660,22 @@ export default function Home() {
         if (guardianAutotuneLoading) return;
         try {
             setGuardianAutotuneLoading(true);
-            const res = await api.get('/guardian/autotune/lifecycle/latest');
-            const payload = res.data || {};
-            setGuardianAutotuneConfig(payload.config || null);
+            const [lifecycleRes, historyRes, evalLogsRes] = await Promise.all([
+                api.get('/guardian/autotune/lifecycle/latest'),
+                api.get('/guardian/autotune/lifecycle/history', { params: { days: 14, limit: 12 } }),
+                api.get('/guardian/autotune/evaluation/logs', { params: { days: 14, limit: 8 } })
+            ]);
+            const lifecyclePayload = lifecycleRes.data || {};
+            setGuardianAutotuneConfig(lifecyclePayload.config || null);
             setGuardianAutotuneLifecycle({
-                proposal: payload.proposal || null,
-                lifecycle: payload.lifecycle || {}
+                proposal: lifecyclePayload.proposal || null,
+                lifecycle: lifecyclePayload.lifecycle || {}
             });
+            const historyPayload = historyRes.data || {};
+            setGuardianAutotuneHistory(historyPayload.history || []);
+            setGuardianAutotuneMetrics(historyPayload.metrics || null);
+            const evalLogsPayload = evalLogsRes.data || {};
+            setGuardianAutotuneEvalLogs(evalLogsPayload.logs || []);
             setGuardianAutotuneDirty(false);
         } catch (e) {
             console.error(e);
@@ -644,6 +725,12 @@ export default function Home() {
                     max_int_step: Number(guardianAutotuneConfig?.guardrails?.max_int_step ?? 1),
                     max_float_step: Number(guardianAutotuneConfig?.guardrails?.max_float_step ?? 0.05),
                     min_confidence: Number(guardianAutotuneConfig?.guardrails?.min_confidence ?? 0.55)
+                },
+                auto_evaluate: {
+                    enabled: Boolean(guardianAutotuneConfig?.auto_evaluate?.enabled ?? true),
+                    horizon_hours: Number(guardianAutotuneConfig?.auto_evaluate?.horizon_hours ?? 48),
+                    lookback_days: Number(guardianAutotuneConfig?.auto_evaluate?.lookback_days ?? 90),
+                    max_targets_per_cycle: Number(guardianAutotuneConfig?.auto_evaluate?.max_targets_per_cycle ?? 3)
                 }
             };
             const res = await api.put('/guardian/autotune/config', payload);
@@ -678,17 +765,18 @@ export default function Home() {
         if (guardianAutotuneActionLoading) return;
         const proposal = guardianAutotuneLifecycle?.proposal || {};
         const latestApplied = guardianAutotuneLifecycle?.lifecycle?.latest_applied?.payload || {};
-        const proposalId = action === 'rollback'
+        const proposalId = (action === 'rollback' || action === 'evaluate')
             ? (latestApplied.proposal_id || null)
             : (proposal.proposal_id || null);
-        const fingerprint = action === 'rollback'
+        const fingerprint = (action === 'rollback' || action === 'evaluate')
             ? (latestApplied.fingerprint || null)
             : (proposal.fingerprint || null);
         const reasonMap = {
             review: 'manual_review',
             apply: 'manual_apply',
             reject: 'manual_reject',
-            rollback: 'manual_rollback'
+            rollback: 'manual_rollback',
+            evaluate: 'manual_evaluate'
         };
         try {
             setGuardianAutotuneActionLoading(true);
@@ -706,6 +794,173 @@ export default function Home() {
             console.error(e);
             setError(`执行 Autotune ${action} 失败: ` + (e.response?.data?.detail || e.message));
         } finally {
+            setGuardianAutotuneActionLoading(false);
+        }
+    };
+
+    const getAutotuneEvalLogKey = (item, idx) => `${item?.timestamp || 'unknown'}_${idx}`;
+    const getAutotuneRetryResultKey = (entry, idx) => `${entry?.proposal_id || 'unknown'}_${entry?.fingerprint || 'unknown'}_${idx}`;
+
+    const toggleGuardianAutotuneEvalLog = (logKey) => {
+        setGuardianAutotuneExpandedLogMap((prev) => ({
+            ...prev,
+            [logKey]: !prev?.[logKey]
+        }));
+    };
+
+    const closeGuardianAutotuneRetryResultModal = () => {
+        setGuardianAutotuneRetryResult(null);
+        setGuardianAutotuneRetryCopiedKey(null);
+    };
+
+    const copyGuardianAutotuneRetryContext = async (payload, copiedKey) => {
+        try {
+            await copyTextToClipboard(JSON.stringify(payload, null, 2));
+            setGuardianAutotuneRetryCopiedKey(copiedKey);
+            setError(null);
+        } catch (e) {
+            console.error(e);
+            setError('复制错误上下文失败: ' + extractApiErrorDetail(e));
+        }
+    };
+
+    const copyGuardianAutotuneRetryFailureContext = async (entry, idx) => {
+        if (!entry || entry.status !== 'failed') return;
+        await copyGuardianAutotuneRetryContext(
+            entry.error_context || {},
+            getAutotuneRetryResultKey(entry, idx)
+        );
+    };
+
+    const copyAllGuardianAutotuneRetryFailureContexts = async () => {
+        const retryResultItems = Array.isArray(guardianAutotuneRetryResult?.results)
+            ? guardianAutotuneRetryResult.results
+            : [];
+        const failedEntries = retryResultItems.filter((entry) => entry?.status === 'failed');
+        if (!failedEntries.length) return;
+        const payload = {
+            source_log_timestamp: guardianAutotuneRetryResult?.logTimestamp || null,
+            copied_at: new Date().toISOString(),
+            failures: failedEntries.map((entry, idx) => ({
+                index: idx + 1,
+                proposal_id: entry?.proposal_id || null,
+                fingerprint: entry?.fingerprint || null,
+                error_context: entry?.error_context || {}
+            }))
+        };
+        await copyGuardianAutotuneRetryContext(payload, 'all_failures');
+    };
+
+    const retryFailedGuardianAutotuneEvaluate = async (item, idx) => {
+        if (guardianAutotuneActionLoading) return;
+        const rawErrors = Array.isArray(item?.errors) ? item.errors : [];
+        const retryTargets = rawErrors.filter((err) => {
+            const proposalId = String(err?.proposal_id || '').trim();
+            const fingerprint = String(err?.fingerprint || '').trim();
+            return proposalId && fingerprint;
+        });
+        if (retryTargets.length === 0) {
+            setError('该日志没有可重跑的失败项（缺少 proposal_id/fingerprint）。');
+            return;
+        }
+
+        const logKey = getAutotuneEvalLogKey(item, idx);
+        const retryNote = `retry_from_log:${item?.timestamp || 'unknown'}`;
+        try {
+            setGuardianAutotuneActionLoading(true);
+            setGuardianAutotuneRetryLogKey(logKey);
+            setGuardianAutotuneRetryResult(null);
+            setGuardianAutotuneRetryCopiedKey(null);
+            setError(null);
+            const settled = await Promise.allSettled(
+                retryTargets.map((err) =>
+                    api.post('/guardian/autotune/lifecycle/evaluate', {
+                        proposal_id: err.proposal_id,
+                        fingerprint: err.fingerprint,
+                        actor: 'home_dashboard',
+                        source: 'manual',
+                        reason: 'retry_failed_cycle_evaluate',
+                        note: retryNote,
+                        force: true
+                    })
+                )
+            );
+            const retryResults = settled.map((entry, entryIdx) => {
+                const target = retryTargets[entryIdx] || {};
+                if (entry.status === 'fulfilled') {
+                    const responseData = entry.value?.data || {};
+                    const evaluation = responseData?.evaluation || {};
+                    return {
+                        proposal_id: target.proposal_id || null,
+                        fingerprint: target.fingerprint || null,
+                        status: 'success',
+                        api_status: responseData?.status || 'ok',
+                        status_code: entry.value?.status ?? null,
+                        detail: null,
+                        evaluated_at: evaluation?.evaluated_at || null,
+                        trust_delta_status: evaluation?.trust_delta_status || null,
+                        error_context: null
+                    };
+                }
+
+                const reason = entry.reason;
+                const statusCode = reason?.response?.status ?? target?.status_code ?? null;
+                const detail = extractApiErrorDetail(reason);
+                return {
+                    proposal_id: target.proposal_id || null,
+                    fingerprint: target.fingerprint || null,
+                    status: 'failed',
+                    api_status: 'error',
+                    status_code: statusCode,
+                    detail,
+                    evaluated_at: null,
+                    trust_delta_status: null,
+                    error_context: {
+                        source_log_timestamp: item?.timestamp || null,
+                        retry_target_index: entryIdx + 1,
+                        proposal_id: target.proposal_id || null,
+                        fingerprint: target.fingerprint || null,
+                        request_payload: {
+                            proposal_id: target.proposal_id || null,
+                            fingerprint: target.fingerprint || null,
+                            actor: 'home_dashboard',
+                            source: 'manual',
+                            reason: 'retry_failed_cycle_evaluate',
+                            note: retryNote,
+                            force: true
+                        },
+                        previous_cycle_error: {
+                            status_code: target?.status_code ?? null,
+                            detail: target?.detail || null
+                        },
+                        retry_error: {
+                            status_code: statusCode,
+                            detail,
+                            response_payload: reason?.response?.data || null
+                        }
+                    }
+                };
+            });
+            const successCount = retryResults.filter((entry) => entry.status === 'success').length;
+            const failedCount = retryResults.length - successCount;
+            setGuardianAutotuneRetryResult({
+                logTimestamp: item?.timestamp || null,
+                finishedAt: new Date().toISOString(),
+                totalCount: retryResults.length,
+                successCount,
+                failedCount,
+                results: retryResults
+            });
+            await refreshGuardianAutotuneState();
+            await fetchAll();
+            if (failedCount > 0) {
+                setError(`重跑完成：成功 ${successCount}，失败 ${failedCount}`);
+            }
+        } catch (e) {
+            console.error(e);
+            setError('重跑失败项评估失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianAutotuneRetryLogKey(null);
             setGuardianAutotuneActionLoading(false);
         }
     };
@@ -885,6 +1140,7 @@ export default function Home() {
     const l2Cfg = guardianThresholds.l2_protection || {};
     const guardianAutotuneTriggerCfg = guardianAutotuneConfig?.trigger || {};
     const guardianAutotuneGuardrailsCfg = guardianAutotuneConfig?.guardrails || {};
+    const guardianAutotuneAutoEvalCfg = guardianAutotuneConfig?.auto_evaluate || {};
     const guardianAutotuneMode = guardianAutotuneConfig?.mode || 'shadow';
     const guardianAutotuneAssistMode = guardianAutotuneMode === 'assist';
     const guardianAutotuneProposal = guardianAutotuneLifecycle?.proposal || null;
@@ -893,7 +1149,39 @@ export default function Home() {
         ? Object.entries(guardianAutotuneProposal.patch)
         : [];
     const guardianAutotuneLatestApplied = guardianAutotuneLifecycleData?.latest_applied?.payload || {};
+    const guardianAutotuneLatestEvaluated = guardianAutotuneLifecycleData?.latest_evaluated?.payload || {};
     const guardianAutotuneRollbackRec = guardianAutotuneLifecycleData?.rollback_recommendation || {};
+    const guardianAutotuneHistoryItems = Array.isArray(guardianAutotuneHistory)
+        ? guardianAutotuneHistory
+        : [];
+    const guardianAutotuneEvalLogItems = Array.isArray(guardianAutotuneEvalLogs)
+        ? guardianAutotuneEvalLogs
+        : [];
+    const guardianAutotuneRetryResultItems = Array.isArray(guardianAutotuneRetryResult?.results)
+        ? guardianAutotuneRetryResult.results
+        : [];
+    const guardianAutotuneRetryFailedItems = guardianAutotuneRetryResultItems.filter((entry) => entry?.status === 'failed');
+    const guardianAutotuneOpsMetrics = guardianAutotuneMetrics || {};
+    const reviewTurnaroundMetric = guardianAutotuneOpsMetrics?.autotune_review_turnaround_hours || {};
+    const applySuccessMetric = guardianAutotuneOpsMetrics?.autotune_apply_success_rate || {};
+    const rollbackRateMetric = guardianAutotuneOpsMetrics?.autotune_rollback_rate || {};
+    const trustDeltaMetric = guardianAutotuneOpsMetrics?.post_apply_trust_delta_48h || {};
+    const reviewMedianHours = Number(reviewTurnaroundMetric?.median_hours);
+    const applySuccessRate = Number(applySuccessMetric?.rate);
+    const rollbackRate = Number(rollbackRateMetric?.rate);
+    const trustDeltaAvg = Number(trustDeltaMetric?.average_delta);
+    const reviewMedianLabel = Number.isFinite(reviewMedianHours)
+        ? `${reviewMedianHours.toFixed(2)}h`
+        : '--';
+    const applySuccessLabel = Number.isFinite(applySuccessRate)
+        ? `${Math.round(applySuccessRate * 100)}%`
+        : '--';
+    const rollbackRateLabel = Number.isFinite(rollbackRate)
+        ? `${Math.round(rollbackRate * 100)}%`
+        : '--';
+    const trustDeltaLabel = Number.isFinite(trustDeltaAvg)
+        ? `${trustDeltaAvg >= 0 ? '+' : ''}${trustDeltaAvg.toFixed(3)}`
+        : '--';
     const guardianAutotuneCanReview = Boolean(guardianAutotuneProposal?.proposal_id)
         && guardianAutotuneAssistMode;
     const guardianAutotuneCanApply = Boolean(guardianAutotuneProposal?.proposal_id)
@@ -901,6 +1189,8 @@ export default function Home() {
     const guardianAutotuneCanReject = Boolean(guardianAutotuneProposal?.proposal_id)
         && guardianAutotuneAssistMode;
     const guardianAutotuneCanRollback = Boolean(guardianAutotuneLatestApplied?.proposal_id)
+        && guardianAutotuneAssistMode;
+    const guardianAutotuneCanEvaluate = Boolean(guardianAutotuneLatestApplied?.proposal_id)
         && guardianAutotuneAssistMode;
     const blueprintNarrative = retrospective?.blueprint_narrative || {};
     const blueprintDimensions = blueprintNarrative?.dimensions || {};
@@ -1969,6 +2259,39 @@ export default function Home() {
                                             style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
                                         />
                                     </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        评估窗口(小时)
+                                        <input
+                                            type="number"
+                                            min="6"
+                                            max="168"
+                                            value={guardianAutotuneAutoEvalCfg.horizon_hours ?? 48}
+                                            onChange={(e) => updateGuardianAutotuneNestedField('auto_evaluate', 'horizon_hours', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        评估回看天数
+                                        <input
+                                            type="number"
+                                            min="7"
+                                            max="365"
+                                            value={guardianAutotuneAutoEvalCfg.lookback_days ?? 90}
+                                            onChange={(e) => updateGuardianAutotuneNestedField('auto_evaluate', 'lookback_days', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        每轮最大评估数
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            max="20"
+                                            value={guardianAutotuneAutoEvalCfg.max_targets_per_cycle ?? 3}
+                                            onChange={(e) => updateGuardianAutotuneNestedField('auto_evaluate', 'max_targets_per_cycle', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
                                     <label style={{ display: 'flex', gap: '0.35rem', alignItems: 'center', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
                                         <input
                                             type="checkbox"
@@ -1985,6 +2308,14 @@ export default function Home() {
                                         />
                                         启用 LLM 候选
                                     </label>
+                                    <label style={{ display: 'flex', gap: '0.35rem', alignItems: 'center', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={Boolean(guardianAutotuneAutoEvalCfg.enabled ?? true)}
+                                            onChange={(e) => updateGuardianAutotuneNestedField('auto_evaluate', 'enabled', e.target.checked)}
+                                        />
+                                        启用自动评估
+                                    </label>
                                 </div>
                             ) : (
                                 <div style={{ marginTop: '0.45rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
@@ -1997,6 +2328,161 @@ export default function Home() {
                                     上次保存: {guardianAutotuneSavedAt}
                                 </div>
                             )}
+
+                            <div style={{ marginTop: '0.55rem', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.5rem' }}>
+                                <div style={{ fontSize: '0.75rem', fontWeight: 600 }}>
+                                    运营指标（近 {guardianAutotuneOpsMetrics?.window_days || 14} 天）
+                                </div>
+                                <div style={{ marginTop: '0.35rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.35rem' }}>
+                                    <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '0.35rem 0.4rem', background: 'rgba(255,255,255,0.03)' }}>
+                                        <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>审阅中位耗时</div>
+                                        <div style={{ marginTop: '0.1rem', fontSize: '0.8rem' }}>{reviewMedianLabel}</div>
+                                    </div>
+                                    <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '0.35rem 0.4rem', background: 'rgba(255,255,255,0.03)' }}>
+                                        <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>48h 应用成功率</div>
+                                        <div style={{ marginTop: '0.1rem', fontSize: '0.8rem' }}>{applySuccessLabel}</div>
+                                    </div>
+                                    <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '0.35rem 0.4rem', background: 'rgba(255,255,255,0.03)' }}>
+                                        <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>回滚率</div>
+                                        <div style={{ marginTop: '0.1rem', fontSize: '0.8rem' }}>{rollbackRateLabel}</div>
+                                    </div>
+                                    <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '0.35rem 0.4rem', background: 'rgba(255,255,255,0.03)' }}>
+                                        <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>48h 信任变化</div>
+                                        <div style={{ marginTop: '0.1rem', fontSize: '0.8rem' }}>{trustDeltaLabel}</div>
+                                    </div>
+                                </div>
+                                <div style={{ marginTop: '0.25rem', fontSize: '0.68rem', color: 'var(--text-secondary)' }}>
+                                    trust 状态: {trustDeltaMetric?.status || 'unavailable'} · pending {trustDeltaMetric?.pending ?? 0} · unavailable {trustDeltaMetric?.unavailable ?? 0}
+                                </div>
+                            </div>
+
+                            <div style={{ marginTop: '0.55rem', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.5rem' }}>
+                                <div style={{ fontSize: '0.75rem', fontWeight: 600 }}>近期生命周期链路</div>
+                                {guardianAutotuneHistoryItems.length > 0 ? (
+                                    <div style={{ marginTop: '0.3rem', display: 'grid', gap: '0.28rem' }}>
+                                        {guardianAutotuneHistoryItems.slice(0, 5).map((item) => (
+                                            <div
+                                                key={`autotune_history_${item.proposal_id || item.fingerprint}`}
+                                                style={{
+                                                    border: '1px solid rgba(255,255,255,0.1)',
+                                                    borderRadius: '6px',
+                                                    padding: '0.35rem 0.45rem',
+                                                    background: 'rgba(255,255,255,0.02)'
+                                                }}
+                                            >
+                                                <div style={{ fontSize: '0.72rem' }}>
+                                                    {item.proposal_id || '--'} · {autotuneStatusLabelMap[item.status] || item.status || '--'}
+                                                </div>
+                                                <div style={{ marginTop: '0.15rem', fontSize: '0.68rem', color: 'var(--text-secondary)' }}>
+                                                    latest: {item.latest_timestamp || '--'}
+                                                    {typeof item.review_turnaround_hours === 'number'
+                                                        ? ` · review ${item.review_turnaround_hours.toFixed(2)}h`
+                                                        : ''}
+                                                </div>
+                                                {item.apply_evaluation && (
+                                                    <div style={{ marginTop: '0.12rem', fontSize: '0.68rem', color: 'var(--text-secondary)' }}>
+                                                        apply_48h: {item.apply_evaluation.status || '--'}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <div style={{ marginTop: '0.25rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        暂无生命周期历史数据。
+                                    </div>
+                                )}
+                            </div>
+
+                            <div style={{ marginTop: '0.55rem', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.5rem' }}>
+                                <div style={{ fontSize: '0.75rem', fontWeight: 600 }}>最近自动评估运行（cycle）</div>
+                                {guardianAutotuneEvalLogItems.length > 0 ? (
+                                    <div style={{ marginTop: '0.3rem', display: 'grid', gap: '0.28rem' }}>
+                                        {guardianAutotuneEvalLogItems.slice(0, 5).map((item, idx) => {
+                                            const logKey = getAutotuneEvalLogKey(item, idx);
+                                            const expanded = Boolean(guardianAutotuneExpandedLogMap?.[logKey]);
+                                            const logErrors = Array.isArray(item?.errors) ? item.errors : [];
+                                            const retryableCount = logErrors.filter((err) => {
+                                                const proposalId = String(err?.proposal_id || '').trim();
+                                                const fingerprint = String(err?.fingerprint || '').trim();
+                                                return proposalId && fingerprint;
+                                            }).length;
+                                            return (
+                                                <div
+                                                    key={`autotune_eval_log_${item.timestamp || idx}`}
+                                                    style={{
+                                                        border: '1px solid rgba(255,255,255,0.1)',
+                                                        borderRadius: '6px',
+                                                        padding: '0.35rem 0.45rem',
+                                                        background: 'rgba(255,255,255,0.02)'
+                                                    }}
+                                                >
+                                                    <div style={{ fontSize: '0.72rem' }}>
+                                                        {item.timestamp || '--'} · status={item.status || '--'} · evaluated={item.evaluated_count ?? 0}
+                                                    </div>
+                                                    <div style={{ marginTop: '0.15rem', fontSize: '0.68rem', color: 'var(--text-secondary)' }}>
+                                                        reason={item.reason || '--'} · targets={item.target_count ?? 0} · errors={item.error_count ?? 0}
+                                                    </div>
+                                                    {logErrors.length > 0 && (
+                                                        <div style={{ marginTop: '0.25rem', display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                                            <button
+                                                                type="button"
+                                                                className="btn btn-secondary"
+                                                                onClick={() => toggleGuardianAutotuneEvalLog(logKey)}
+                                                                style={{ fontSize: '0.68rem', padding: '0.16rem 0.5rem' }}
+                                                            >
+                                                                {expanded ? '收起失败详情' : '展开失败详情'}
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                className="btn btn-secondary"
+                                                                onClick={() => retryFailedGuardianAutotuneEvaluate(item, idx)}
+                                                                disabled={
+                                                                    guardianAutotuneActionLoading
+                                                                    || retryableCount === 0
+                                                                }
+                                                                style={{ fontSize: '0.68rem', padding: '0.16rem 0.5rem' }}
+                                                            >
+                                                                {guardianAutotuneRetryLogKey === logKey
+                                                                    ? '重跑中...'
+                                                                    : `重跑失败评估 (${retryableCount})`}
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                    {expanded && logErrors.length > 0 && (
+                                                        <div
+                                                            style={{
+                                                                marginTop: '0.28rem',
+                                                                display: 'grid',
+                                                                gap: '0.16rem',
+                                                                borderTop: '1px dashed rgba(255,255,255,0.15)',
+                                                                paddingTop: '0.25rem'
+                                                            }}
+                                                        >
+                                                            {logErrors.map((err, errIdx) => (
+                                                                <div
+                                                                    key={`autotune_eval_log_err_${logKey}_${errIdx}`}
+                                                                    style={{ fontSize: '0.67rem', color: 'var(--text-secondary)' }}
+                                                                >
+                                                                    #{errIdx + 1}
+                                                                    {' · '}proposal={err?.proposal_id || '--'}
+                                                                    {' · '}fingerprint={err?.fingerprint || '--'}
+                                                                    {' · '}code={err?.status_code ?? '--'}
+                                                                    {' · '}detail={err?.detail || '--'}
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                ) : (
+                                    <div style={{ marginTop: '0.25rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        暂无自动评估运行日志。
+                                    </div>
+                                )}
+                            </div>
 
                             <div style={{ marginTop: '0.55rem', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.5rem' }}>
                                 <div style={{ fontSize: '0.75rem', fontWeight: 600 }}>最新提议</div>
@@ -2022,7 +2508,7 @@ export default function Home() {
                                         )}
                                         {!guardianAutotuneAssistMode && (
                                             <div style={{ fontSize: '0.72rem', color: '#fcd34d' }}>
-                                                当前 mode=shadow，仅提议不执行。切换到 assist 后可执行 review/apply/reject/rollback。
+                                                当前 mode=shadow，仅提议不执行。切换到 assist 后可执行 review/apply/reject/evaluate/rollback。
                                             </div>
                                         )}
                                         <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
@@ -2056,6 +2542,15 @@ export default function Home() {
                                             <button
                                                 type="button"
                                                 className="btn btn-secondary"
+                                                onClick={() => runGuardianAutotuneLifecycleAction('evaluate')}
+                                                disabled={!guardianAutotuneCanEvaluate || guardianAutotuneActionLoading}
+                                                style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                            >
+                                                Evaluate 48h
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="btn btn-secondary"
                                                 onClick={() => runGuardianAutotuneLifecycleAction('rollback')}
                                                 disabled={!guardianAutotuneCanRollback || guardianAutotuneActionLoading}
                                                 style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
@@ -2065,8 +2560,32 @@ export default function Home() {
                                         </div>
                                     </div>
                                 ) : (
-                                    <div style={{ marginTop: '0.25rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
-                                        暂无可用提议，点击“生成提议”触发一次手动运行。
+                                    <div style={{ marginTop: '0.25rem', display: 'grid', gap: '0.35rem' }}>
+                                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            暂无可用提议，点击“生成提议”触发一次手动运行。
+                                        </div>
+                                        {(guardianAutotuneCanEvaluate || guardianAutotuneCanRollback) && (
+                                            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                                <button
+                                                    type="button"
+                                                    className="btn btn-secondary"
+                                                    onClick={() => runGuardianAutotuneLifecycleAction('evaluate')}
+                                                    disabled={!guardianAutotuneCanEvaluate || guardianAutotuneActionLoading}
+                                                    style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                                >
+                                                    Evaluate 48h
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="btn btn-secondary"
+                                                    onClick={() => runGuardianAutotuneLifecycleAction('rollback')}
+                                                    disabled={!guardianAutotuneCanRollback || guardianAutotuneActionLoading}
+                                                    style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                                >
+                                                    Rollback
+                                                </button>
+                                            </div>
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -2077,6 +2596,15 @@ export default function Home() {
                                     ? ` · ${guardianAutotuneRollbackRec.reasons.join(' / ')}`
                                     : ''}
                             </div>
+                            {guardianAutotuneLatestEvaluated?.evaluated_at && (
+                                <div style={{ marginTop: '0.25rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    最近评估: {guardianAutotuneLatestEvaluated.evaluated_at}
+                                    {' · '}status={guardianAutotuneLatestEvaluated.trust_delta_status || '--'}
+                                    {' · '}delta={typeof guardianAutotuneLatestEvaluated.trust_delta_48h === 'number'
+                                        ? `${guardianAutotuneLatestEvaluated.trust_delta_48h >= 0 ? '+' : ''}${guardianAutotuneLatestEvaluated.trust_delta_48h.toFixed(3)}`
+                                        : '--'}
+                                </div>
+                            )}
                         </div>
 
                         {retrospective.display && retrospective.suggestion && (
@@ -2269,6 +2797,137 @@ export default function Home() {
                         )}
                     </div>
                 </section>
+            )}
+
+            {guardianAutotuneRetryResult && (
+                <div
+                    style={{
+                        position: 'fixed',
+                        inset: 0,
+                        background: 'rgba(0, 0, 0, 0.55)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        zIndex: 1010,
+                        padding: '1rem'
+                    }}
+                    onClick={closeGuardianAutotuneRetryResultModal}
+                >
+                    <div
+                        className="glass-card"
+                        style={{
+                            width: '100%',
+                            maxWidth: '860px',
+                            maxHeight: '86vh',
+                            padding: '1rem',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '0.65rem'
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                            <h4 style={{ margin: 0 }}>重跑失败评估结果</h4>
+                            <button
+                                type="button"
+                                className="btn btn-secondary"
+                                onClick={closeGuardianAutotuneRetryResultModal}
+                                style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                            >
+                                关闭
+                            </button>
+                        </div>
+                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                            source_log={guardianAutotuneRetryResult?.logTimestamp || '--'}
+                            {' · '}
+                            finished_at={guardianAutotuneRetryResult?.finishedAt || '--'}
+                        </div>
+                        <div style={{ display: 'grid', gap: '0.35rem', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))' }}>
+                            <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '0.35rem 0.4rem', background: 'rgba(255,255,255,0.03)' }}>
+                                <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>总数</div>
+                                <div style={{ marginTop: '0.1rem', fontSize: '0.8rem' }}>{guardianAutotuneRetryResult?.totalCount ?? 0}</div>
+                            </div>
+                            <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '0.35rem 0.4rem', background: 'rgba(255,255,255,0.03)' }}>
+                                <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>成功</div>
+                                <div style={{ marginTop: '0.1rem', fontSize: '0.8rem', color: '#86efac' }}>{guardianAutotuneRetryResult?.successCount ?? 0}</div>
+                            </div>
+                            <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '0.35rem 0.4rem', background: 'rgba(255,255,255,0.03)' }}>
+                                <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>失败</div>
+                                <div style={{ marginTop: '0.1rem', fontSize: '0.8rem', color: '#fca5a5' }}>{guardianAutotuneRetryResult?.failedCount ?? 0}</div>
+                            </div>
+                        </div>
+
+                        {guardianAutotuneRetryFailedItems.length > 0 && (
+                            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    onClick={copyAllGuardianAutotuneRetryFailureContexts}
+                                    style={{ fontSize: '0.68rem', padding: '0.2rem 0.55rem' }}
+                                >
+                                    {guardianAutotuneRetryCopiedKey === 'all_failures'
+                                        ? '已复制全部失败上下文'
+                                        : `复制全部失败上下文 (${guardianAutotuneRetryFailedItems.length})`}
+                                </button>
+                            </div>
+                        )}
+
+                        <div style={{ overflowY: 'auto', maxHeight: '48vh', display: 'grid', gap: '0.32rem', paddingRight: '0.2rem' }}>
+                            {guardianAutotuneRetryResultItems.map((entry, idx) => {
+                                const failed = entry?.status === 'failed';
+                                const copyKey = getAutotuneRetryResultKey(entry, idx);
+                                return (
+                                    <div
+                                        key={`autotune_retry_result_${copyKey}`}
+                                        style={{
+                                            border: failed ? '1px solid rgba(248,113,113,0.35)' : '1px solid rgba(134,239,172,0.35)',
+                                            borderRadius: '6px',
+                                            padding: '0.38rem 0.45rem',
+                                            background: failed ? 'rgba(127,29,29,0.18)' : 'rgba(20,83,45,0.18)'
+                                        }}
+                                    >
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                            <div style={{ fontSize: '0.7rem' }}>
+                                                #{idx + 1}
+                                                {' · '}proposal={entry?.proposal_id || '--'}
+                                            </div>
+                                            <span style={{ fontSize: '0.66rem', color: failed ? '#fca5a5' : '#86efac' }}>
+                                                {failed ? 'FAILED' : 'SUCCESS'}
+                                            </span>
+                                        </div>
+                                        <div style={{ marginTop: '0.12rem', fontSize: '0.68rem', color: 'var(--text-secondary)' }}>
+                                            fingerprint={entry?.fingerprint || '--'}
+                                            {' · '}status={entry?.api_status || '--'}
+                                            {' · '}code={entry?.status_code ?? '--'}
+                                        </div>
+                                        {failed ? (
+                                            <div style={{ marginTop: '0.2rem', display: 'flex', justifyContent: 'space-between', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                                                <div style={{ fontSize: '0.68rem', color: '#fecaca', flex: 1, minWidth: '220px' }}>
+                                                    detail={entry?.detail || '--'}
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    className="btn btn-secondary"
+                                                    onClick={() => copyGuardianAutotuneRetryFailureContext(entry, idx)}
+                                                    style={{ fontSize: '0.66rem', padding: '0.16rem 0.5rem' }}
+                                                >
+                                                    {guardianAutotuneRetryCopiedKey === copyKey
+                                                        ? '已复制错误上下文'
+                                                        : '复制错误上下文'}
+                                                </button>
+                                            </div>
+                                        ) : (
+                                            <div style={{ marginTop: '0.2rem', fontSize: '0.68rem', color: 'var(--text-secondary)' }}>
+                                                evaluated_at={entry?.evaluated_at || '--'}
+                                                {entry?.trust_delta_status ? ` · trust_delta_status=${entry.trust_delta_status}` : ''}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                </div>
             )}
 
             <OverlayModal

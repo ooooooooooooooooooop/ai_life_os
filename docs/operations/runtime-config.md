@@ -124,13 +124,20 @@ Main fields:
 - `guardrails.max_int_step`
 - `guardrails.max_float_step`
 - `guardrails.min_confidence`
+- `auto_evaluate.enabled`
+- `auto_evaluate.horizon_hours`
+- `auto_evaluate.lookback_days`
+- `auto_evaluate.max_targets_per_cycle`
 
 ### Lifecycle API
 
 - `GET /api/v1/guardian/autotune/lifecycle/latest`
+- `GET /api/v1/guardian/autotune/lifecycle/history?days=14&limit=20`
+- `GET /api/v1/guardian/autotune/evaluation/logs?days=14&limit=20`
 - `POST /api/v1/guardian/autotune/lifecycle/review`
 - `POST /api/v1/guardian/autotune/lifecycle/apply`
 - `POST /api/v1/guardian/autotune/lifecycle/reject`
+- `POST /api/v1/guardian/autotune/lifecycle/evaluate`
 - `POST /api/v1/guardian/autotune/lifecycle/rollback`
 
 Lifecycle request body supports:
@@ -141,11 +148,37 @@ Lifecycle request body supports:
 - `source`
 - `reason`
 - `note`
+- `force` (optional, default `false`; allows early/manual re-evaluation)
+
+`lifecycle/history` returns:
+
+- proposal lifecycle history chain (`proposed/reviewed/applied/rejected/evaluated/rolled_back`)
+- operational metrics:
+  - `autotune_review_turnaround_hours`
+  - `autotune_apply_success_rate` (48h window)
+  - `autotune_rollback_rate`
+  - `post_apply_trust_delta_48h` (nullable with status/reason)
+
+`evaluation/logs` returns cycle auto-evaluation run summaries:
+
+- `status`, `mode`, `reason`
+- `evaluated_count`, `target_count`, `error_count`
+- `targets`, `errors`, `config`
+- each `errors` item includes `proposal_id`, `fingerprint`, `status_code`, `detail`
 
 ### Operational Notes
 
 - Lifecycle actions require `mode=assist`; otherwise API returns `409`.
 - Apply records before/after threshold snapshots and supports one-step rollback.
+- Apply events now record `trust_index_before` for post-apply trust tracking.
+- `evaluate` action settles 48h outcome (`trust_index_after_48h`, trust delta, apply outcome status).
+- `POST /api/v1/sys/cycle` now runs auto-evaluate for overdue apply records and returns
+  `guardian_autotune_evaluation` payload (status, evaluated_count, targets, errors).
+- Auto-evaluate scan/window/throughput are driven by `guardian_autotune.auto_evaluate` config.
+- Each cycle auto-evaluation run is appended to event log and can be queried via
+  `GET /api/v1/guardian/autotune/evaluation/logs`.
+- Failed log items can be retried by calling
+  `POST /api/v1/guardian/autotune/lifecycle/evaluate` with `force=true`.
 - Lifecycle snapshot includes `rollback_recommendation` based on:
   - guardian safe mode active
   - low trust index

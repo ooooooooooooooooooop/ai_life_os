@@ -284,6 +284,10 @@ def test_get_guardian_autotune_config_defaults_when_file_missing(monkeypatch, tm
     assert config["llm_enabled"] is True
     assert config["trigger"]["lookback_days"] == 7
     assert config["guardrails"]["max_int_step"] == 1
+    assert config["auto_evaluate"]["enabled"] is True
+    assert config["auto_evaluate"]["horizon_hours"] == 48
+    assert config["auto_evaluate"]["lookback_days"] == 90
+    assert config["auto_evaluate"]["max_targets_per_cycle"] == 3
 
 
 def test_update_guardian_autotune_config_persists_and_emits_event(monkeypatch, tmp_path):
@@ -308,6 +312,12 @@ def test_update_guardian_autotune_config_persists_and_emits_event(monkeypatch, t
             max_float_step=0.05,
             min_confidence=0.6,
         ),
+        auto_evaluate=api_router.GuardianAutoTuneAutoEvaluateConfigRequest(
+            enabled=True,
+            horizon_hours=72,
+            lookback_days=120,
+            max_targets_per_cycle=5,
+        ),
     )
 
     payload = asyncio.run(api_router.update_guardian_autotune_config(req))
@@ -315,11 +325,14 @@ def test_update_guardian_autotune_config_persists_and_emits_event(monkeypatch, t
     assert payload["config"]["enabled"] is True
     assert payload["config"]["llm_enabled"] is False
     assert payload["config"]["trigger"]["cooldown_hours"] == 36
+    assert payload["config"]["auto_evaluate"]["horizon_hours"] == 72
+    assert payload["config"]["auto_evaluate"]["max_targets_per_cycle"] == 5
     assert emitted and emitted[0]["type"] == "guardian_autotune_config_updated"
 
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert saved["guardian_autotune"]["enabled"] is True
     assert saved["guardian_autotune"]["trigger"]["min_event_count"] == 12
+    assert saved["guardian_autotune"]["auto_evaluate"]["lookback_days"] == 120
 
 
 def test_update_guardian_autotune_config_accepts_assist_mode(monkeypatch, tmp_path):
@@ -465,6 +478,17 @@ def test_sys_cycle_normalizes_audit_shape(monkeypatch):
         "_run_guardian_autotune_shadow",
         lambda trigger="cycle": {"status": "disabled", "mode": "shadow"},
     )
+    async def fake_auto_evaluate(trigger="cycle"):
+        return {
+            "status": "noop",
+            "mode": "shadow",
+            "reason": "assist_mode_required",
+            "evaluated_count": 0,
+            "targets": [],
+        }
+
+    monkeypatch.setattr(api_router, "_run_guardian_autotune_auto_evaluate", fake_auto_evaluate)
+    monkeypatch.setattr(api_router, "append_event", lambda event: None)
 
     payload = asyncio.run(api_router.trigger_cycle())
     assert payload["status"] == "cycled"
@@ -498,11 +522,111 @@ def test_sys_cycle_preserves_anchor_audit_extension(monkeypatch):
         "_run_guardian_autotune_shadow",
         lambda trigger="cycle": {"status": "disabled", "mode": "shadow"},
     )
+    async def fake_auto_evaluate(trigger="cycle"):
+        return {
+            "status": "noop",
+            "mode": "shadow",
+            "reason": "assist_mode_required",
+            "evaluated_count": 0,
+            "targets": [],
+        }
+
+    monkeypatch.setattr(api_router, "_run_guardian_autotune_auto_evaluate", fake_auto_evaluate)
+    monkeypatch.setattr(api_router, "append_event", lambda event: None)
     payload = asyncio.run(api_router.trigger_cycle())
 
     assert "anchor" in payload["audit"]
     assert payload["audit"]["anchor"]["enabled"] is True
     assert payload["audit"]["anchor"]["blocked_actions"] == 1
+
+
+def test_sys_cycle_includes_autotune_auto_evaluation(monkeypatch):
+    emitted = []
+
+    class DummySteward:
+        @staticmethod
+        def run_planning_cycle():
+            return {"actions": [], "executed_auto_tasks": [], "audit": {"strategy": "custom"}}
+
+    monkeypatch.setattr(api_router, "get_steward", lambda: DummySteward())
+    monkeypatch.setattr(
+        api_router,
+        "_run_guardian_autotune_shadow",
+        lambda trigger="cycle": {"status": "disabled", "mode": "assist"},
+    )
+
+    async def fake_auto_eval(trigger="cycle"):
+        return {
+            "status": "completed",
+            "mode": "assist",
+            "evaluated_count": 1,
+            "targets": [{"proposal_id": "atp_x", "fingerprint": "gatfp_x"}],
+            "results": [{"proposal_id": "atp_x", "status": "evaluated"}],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(api_router, "_run_guardian_autotune_auto_evaluate", fake_auto_eval)
+    monkeypatch.setattr(api_router, "append_event", lambda event: emitted.append(event))
+
+    payload = asyncio.run(api_router.trigger_cycle())
+    assert payload["guardian_autotune_evaluation"]["status"] == "completed"
+    assert payload["guardian_autotune_evaluation"]["evaluated_count"] == 1
+    assert emitted and emitted[0]["type"] == api_router.AUTOTUNE_EVENT_AUTO_EVALUATE_CYCLE
+
+
+def test_pending_autotune_evaluation_targets_filters_by_due_and_evaluated(monkeypatch):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 2, 12, 12, 0, 0)
+
+    events = [
+        {
+            "type": api_router.AUTOTUNE_EVENT_APPLIED,
+            "timestamp": "2026-02-12T08:00:00",
+            "payload": {"proposal_id": "atp_recent", "fingerprint": "gatfp_recent"},
+        },
+        {
+            "type": api_router.AUTOTUNE_EVENT_APPLIED,
+            "timestamp": "2026-02-09T08:00:00",
+            "payload": {"proposal_id": "atp_due_done", "fingerprint": "gatfp_due_done"},
+        },
+        {
+            "type": api_router.AUTOTUNE_EVENT_APPLIED,
+            "timestamp": "2026-02-08T08:00:00",
+            "payload": {"proposal_id": "atp_due_pending", "fingerprint": "gatfp_due_pending"},
+        },
+    ]
+
+    def fake_latest_autotune_event(event_type, proposal_id=None, fingerprint=None):
+        if (
+            event_type == api_router.AUTOTUNE_EVENT_EVALUATED
+            and proposal_id == "atp_due_done"
+            and fingerprint == "gatfp_due_done"
+        ):
+            return {
+                "type": event_type,
+                "timestamp": "2026-02-11T09:00:00",
+                "payload": {
+                    "proposal_id": proposal_id,
+                    "fingerprint": fingerprint,
+                    "applied_at": "2026-02-09T08:00:00",
+                },
+            }
+        return None
+
+    monkeypatch.setattr(api_router, "datetime", FixedDatetime)
+    monkeypatch.setattr(api_router, "_load_events_for_days", lambda days: events)
+    monkeypatch.setattr(api_router, "_load_latest_autotune_event", fake_latest_autotune_event)
+
+    targets = api_router._pending_autotune_evaluation_targets(
+        horizon_hours=48,
+        lookback_days=90,
+        limit=3,
+    )
+    assert len(targets) == 1
+    assert targets[0]["proposal_id"] == "atp_due_pending"
+    assert targets[0]["fingerprint"] == "gatfp_due_pending"
 
 
 def test_run_guardian_autotune_shadow_proposes_patch(monkeypatch):
@@ -809,6 +933,11 @@ def test_apply_guardian_autotune_lifecycle_persists_thresholds(monkeypatch, tmp_
     monkeypatch.setattr(api_router, "_load_latest_event", fake_load_latest)
     monkeypatch.setattr(api_router, "append_event", lambda event: emitted.append(event))
     monkeypatch.setattr(api_router, "_current_autotune_mode", lambda: "assist")
+    monkeypatch.setattr(
+        api_router,
+        "build_guardian_retrospective_response",
+        lambda days=7: {"north_star_metrics": {"human_trust_index": {"score": 0.62}}},
+    )
 
     req = api_router.GuardianAutoTuneLifecycleActionRequest(
         proposal_id="atp_test_2",
@@ -822,6 +951,7 @@ def test_apply_guardian_autotune_lifecycle_persists_thresholds(monkeypatch, tmp_
     assert payload["mode"] == "assist"
     assert saved["guardian_thresholds"]["deviation_signals"]["repeated_skip"] == 3
     assert emitted and emitted[0]["type"] == api_router.AUTOTUNE_EVENT_APPLIED
+    assert emitted[0]["payload"]["trust_index_before"] == 0.62
 
 
 def test_rollback_guardian_autotune_lifecycle_restores_previous_thresholds(monkeypatch, tmp_path):
@@ -963,6 +1093,385 @@ def test_autotune_rollback_recommendation_triggers_on_low_trust(monkeypatch):
     rec = api_router._autotune_rollback_recommendation()
     assert rec["should_rollback"] is True
     assert "low_human_trust_index" in rec["reasons"]
+
+
+def test_get_guardian_autotune_lifecycle_history_aggregates_metrics(monkeypatch):
+    def proposal_payload(proposal_id, fingerprint, repeated_skip):
+        return {
+            "proposal_id": proposal_id,
+            "fingerprint": fingerprint,
+            "trigger": "manual",
+            "candidate_source": "deterministic",
+            "confidence": 0.7,
+            "current_thresholds": {
+                "deviation_signals": {
+                    "repeated_skip": repeated_skip,
+                    "l2_interruption": 1,
+                    "stagnation_days": 3,
+                },
+                "l2_protection": {"high": 0.75, "medium": 0.50},
+            },
+            "proposed_thresholds": {
+                "deviation_signals": {
+                    "repeated_skip": repeated_skip + 1,
+                    "l2_interruption": 1,
+                    "stagnation_days": 3,
+                },
+                "l2_protection": {"high": 0.75, "medium": 0.50},
+            },
+        }
+
+    events = [
+        {
+            "type": api_router.AUTOTUNE_EVENT_PROPOSED,
+            "timestamp": "2026-02-09T08:00:00",
+            "payload": proposal_payload("atp_hist_1", "gatfp_hist_1", 2),
+        },
+        {
+            "type": api_router.AUTOTUNE_EVENT_REVIEWED,
+            "timestamp": "2026-02-09T09:00:00",
+            "payload": {
+                "proposal_id": "atp_hist_1",
+                "fingerprint": "gatfp_hist_1",
+                "actor": "tester",
+                "source": "manual",
+                "reason": "looks safe",
+            },
+        },
+        {
+            "type": api_router.AUTOTUNE_EVENT_APPLIED,
+            "timestamp": "2026-02-09T10:00:00",
+            "payload": {
+                "proposal_id": "atp_hist_1",
+                "fingerprint": "gatfp_hist_1",
+                "actor": "tester",
+                "source": "manual",
+                "reason": "apply",
+                "trust_index_before": 0.5,
+                "trust_index_after_48h": 0.6,
+            },
+        },
+        {
+            "type": api_router.AUTOTUNE_EVENT_PROPOSED,
+            "timestamp": "2026-02-10T08:00:00",
+            "payload": proposal_payload("atp_hist_2", "gatfp_hist_2", 3),
+        },
+        {
+            "type": api_router.AUTOTUNE_EVENT_APPLIED,
+            "timestamp": "2026-02-10T09:00:00",
+            "payload": {
+                "proposal_id": "atp_hist_2",
+                "fingerprint": "gatfp_hist_2",
+                "actor": "tester",
+                "source": "manual",
+                "reason": "apply",
+                "trust_index_before": 0.55,
+                "trust_index_after_48h": None,
+            },
+        },
+        {
+            "type": api_router.AUTOTUNE_EVENT_ROLLED_BACK,
+            "timestamp": "2026-02-10T20:00:00",
+            "payload": {
+                "proposal_id": "atp_hist_2",
+                "fingerprint": "gatfp_hist_2",
+                "actor": "tester",
+                "source": "manual",
+                "reason": "rollback",
+            },
+        },
+        {
+            "type": api_router.AUTOTUNE_EVENT_PROPOSED,
+            "timestamp": "2026-02-11T08:00:00",
+            "payload": proposal_payload("atp_hist_3", "gatfp_hist_3", 4),
+        },
+    ]
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 2, 12, 12, 0, 0)
+
+    monkeypatch.setattr(api_router, "_load_events_for_days", lambda days: events)
+    monkeypatch.setattr(api_router, "datetime", FixedDatetime)
+
+    payload = asyncio.run(api_router.get_guardian_autotune_lifecycle_history(days=30, limit=10))
+    metrics = payload["metrics"]
+    assert payload["total"] == 3
+    assert metrics["autotune_review_turnaround_hours"]["median_hours"] == 1.0
+    assert metrics["autotune_apply_success_rate"]["rate"] == 0.5
+    assert metrics["autotune_rollback_rate"]["rate"] == 0.5
+    assert metrics["post_apply_trust_delta_48h"]["average_delta"] == 0.1
+    assert payload["history"][0]["status"] == "proposed"
+    assert any(item["status"] == "rolled_back" for item in payload["history"])
+
+
+def test_evaluate_guardian_autotune_lifecycle_appends_event(monkeypatch):
+    emitted = []
+    applied_event = {
+        "type": api_router.AUTOTUNE_EVENT_APPLIED,
+        "timestamp": "2026-01-01T08:00:00",
+        "payload": {
+            "proposal_id": "atp_eval_1",
+            "fingerprint": "gatfp_eval_1",
+            "trust_index_before": 0.62,
+        },
+    }
+
+    monkeypatch.setattr(api_router, "_current_autotune_mode", lambda: "assist")
+    monkeypatch.setattr(
+        api_router,
+        "_load_latest_autotune_event",
+        lambda event_type, **kwargs: (
+            applied_event if event_type == api_router.AUTOTUNE_EVENT_APPLIED else None
+        ),
+    )
+    monkeypatch.setattr(api_router, "_find_autotune_rollback_within_horizon", lambda **kwargs: None)
+    monkeypatch.setattr(api_router, "_current_human_trust_index", lambda days=7: 0.71)
+    monkeypatch.setattr(api_router, "_autotune_lifecycle_state_snapshot", lambda: {"ok": True})
+    monkeypatch.setattr(api_router, "append_event", lambda event: emitted.append(event))
+
+    req = api_router.GuardianAutoTuneLifecycleActionRequest(
+        proposal_id="atp_eval_1",
+        fingerprint="gatfp_eval_1",
+        reason="manual check",
+    )
+    payload = asyncio.run(api_router.evaluate_guardian_autotune_lifecycle(req))
+
+    assert payload["status"] == "evaluated"
+    assert payload["mode"] == "assist"
+    assert payload["evaluation"]["trust_delta_48h"] == 0.09
+    assert payload["evaluation"]["success_within_48h"] is True
+    assert emitted and emitted[0]["type"] == api_router.AUTOTUNE_EVENT_EVALUATED
+
+
+def test_evaluate_guardian_autotune_lifecycle_returns_pending_within_window(monkeypatch):
+    emitted = []
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 2, 12, 12, 0, 0)
+
+    applied_event = {
+        "type": api_router.AUTOTUNE_EVENT_APPLIED,
+        "timestamp": "2026-02-12T08:00:00",
+        "payload": {
+            "proposal_id": "atp_eval_2",
+            "fingerprint": "gatfp_eval_2",
+            "trust_index_before": 0.62,
+        },
+    }
+
+    monkeypatch.setattr(api_router, "datetime", FixedDatetime)
+    monkeypatch.setattr(api_router, "_current_autotune_mode", lambda: "assist")
+    monkeypatch.setattr(
+        api_router,
+        "_load_latest_autotune_event",
+        lambda event_type, **kwargs: (
+            applied_event if event_type == api_router.AUTOTUNE_EVENT_APPLIED else None
+        ),
+    )
+    monkeypatch.setattr(api_router, "_autotune_lifecycle_state_snapshot", lambda: {"ok": True})
+    monkeypatch.setattr(api_router, "append_event", lambda event: emitted.append(event))
+
+    req = api_router.GuardianAutoTuneLifecycleActionRequest(
+        proposal_id="atp_eval_2",
+        fingerprint="gatfp_eval_2",
+    )
+    payload = asyncio.run(api_router.evaluate_guardian_autotune_lifecycle(req))
+
+    assert payload["status"] == "pending_48h_window"
+    assert payload["evaluation"]["horizon_hours"] == 48
+    assert emitted == []
+
+
+def test_autotune_history_prefers_evaluated_event_for_trust_delta(monkeypatch):
+    events = [
+        {
+            "type": api_router.AUTOTUNE_EVENT_PROPOSED,
+            "timestamp": "2026-02-01T08:00:00",
+            "payload": {
+                "proposal_id": "atp_eval_hist",
+                "fingerprint": "gatfp_eval_hist",
+                "current_thresholds": {
+                    "deviation_signals": {
+                        "repeated_skip": 2,
+                        "l2_interruption": 1,
+                        "stagnation_days": 3,
+                    },
+                    "l2_protection": {"high": 0.75, "medium": 0.50},
+                },
+                "proposed_thresholds": {
+                    "deviation_signals": {
+                        "repeated_skip": 3,
+                        "l2_interruption": 1,
+                        "stagnation_days": 3,
+                    },
+                    "l2_protection": {"high": 0.75, "medium": 0.50},
+                },
+            },
+        },
+        {
+            "type": api_router.AUTOTUNE_EVENT_APPLIED,
+            "timestamp": "2026-02-01T09:00:00",
+            "payload": {
+                "proposal_id": "atp_eval_hist",
+                "fingerprint": "gatfp_eval_hist",
+                "trust_index_before": 0.6,
+                "trust_index_after_48h": None,
+            },
+        },
+        {
+            "type": api_router.AUTOTUNE_EVENT_EVALUATED,
+            "timestamp": "2026-02-03T10:00:00",
+            "payload": {
+                "proposal_id": "atp_eval_hist",
+                "fingerprint": "gatfp_eval_hist",
+                "horizon_hours": 48,
+                "trust_index_before": 0.6,
+                "trust_index_after_48h": 0.66,
+                "trust_delta_48h": 0.06,
+                "trust_delta_status": "ready",
+                "evaluation_reason": None,
+                "apply_outcome_status": "stable_48h",
+                "success_within_48h": True,
+                "evaluated_at": "2026-02-03T10:00:00",
+                "evaluable_at": "2026-02-03T09:00:00",
+            },
+        },
+    ]
+
+    monkeypatch.setattr(api_router, "_load_events_for_days", lambda days: events)
+    payload = asyncio.run(api_router.get_guardian_autotune_lifecycle_history(days=30, limit=10))
+    history_item = payload["history"][0]
+    metrics = payload["metrics"]
+
+    assert history_item["trust_delta_48h"]["status"] == "ready"
+    assert history_item["trust_delta_48h"]["delta"] == 0.06
+    assert history_item["apply_evaluation"]["status"] == "stable_48h"
+    assert metrics["post_apply_trust_delta_48h"]["average_delta"] == 0.06
+    assert metrics["autotune_apply_success_rate"]["rate"] == 1.0
+
+
+def test_get_guardian_autotune_evaluation_logs_filters_and_limits(monkeypatch):
+    events = [
+        {
+            "type": "task_updated",
+            "timestamp": "2026-02-10T07:00:00",
+            "payload": {},
+        },
+        {
+            "type": api_router.AUTOTUNE_EVENT_AUTO_EVALUATE_CYCLE,
+            "timestamp": "2026-02-10T08:00:00",
+            "payload": {
+                "trigger": "cycle",
+                "status": "completed",
+                "mode": "assist",
+                "reason": "auto_evaluate_completed",
+                "evaluated_count": 2,
+                "targets": [{"proposal_id": "atp_1"}],
+                "errors": [],
+                "config": {"horizon_hours": 48},
+            },
+        },
+        {
+            "type": api_router.AUTOTUNE_EVENT_AUTO_EVALUATE_CYCLE,
+            "timestamp": "2026-02-11T08:00:00",
+            "payload": {
+                "trigger": "cycle",
+                "status": "partial",
+                "mode": "assist",
+                "reason": "auto_evaluate_completed",
+                "evaluated_count": 1,
+                "targets": [{"proposal_id": "atp_2"}],
+                "errors": [{"detail": "stale"}],
+                "config": {"horizon_hours": 72},
+            },
+        },
+    ]
+
+    monkeypatch.setattr(api_router, "_load_events_for_days", lambda days: events)
+    payload = asyncio.run(api_router.get_guardian_autotune_evaluation_logs(days=14, limit=1))
+    assert payload["window_days"] == 14
+    assert payload["limit"] == 1
+    assert payload["total"] == 1
+    assert payload["logs"][0]["timestamp"] == "2026-02-11T08:00:00"
+    assert payload["logs"][0]["status"] == "partial"
+    assert payload["logs"][0]["target_count"] == 1
+    assert payload["logs"][0]["error_count"] == 1
+    assert payload["logs"][0]["config"]["horizon_hours"] == 72
+
+
+def test_run_guardian_autotune_auto_evaluate_runs_due_targets(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        api_router,
+        "_load_blueprint_yaml",
+        lambda: {
+            "guardian_autotune": {
+                "enabled": True,
+                "mode": "assist",
+                "auto_evaluate": {
+                    "enabled": True,
+                    "horizon_hours": 72,
+                    "lookback_days": 120,
+                    "max_targets_per_cycle": 5,
+                },
+            }
+        },
+    )
+    def fake_pending_targets(**kwargs):
+        captured["kwargs"] = kwargs
+        return [
+            {
+                "proposal_id": "atp_due_1",
+                "fingerprint": "gatfp_due_1",
+                "applied_at": "2026-02-10T08:00:00",
+            }
+        ]
+
+    monkeypatch.setattr(api_router, "_pending_autotune_evaluation_targets", fake_pending_targets)
+
+    async def fake_evaluate(request):
+        return {
+            "status": "evaluated",
+            "proposal_id": request.proposal_id,
+            "fingerprint": request.fingerprint,
+            "evaluation": {"trust_delta_48h": 0.05},
+        }
+
+    monkeypatch.setattr(api_router, "evaluate_guardian_autotune_lifecycle", fake_evaluate)
+
+    payload = asyncio.run(api_router._run_guardian_autotune_auto_evaluate(trigger="cycle"))
+    assert payload["status"] == "completed"
+    assert payload["mode"] == "assist"
+    assert payload["evaluated_count"] == 1
+    assert payload["results"][0]["status"] == "evaluated"
+    assert payload["config"]["horizon_hours"] == 72
+    assert payload["config"]["lookback_days"] == 120
+    assert payload["config"]["max_targets_per_cycle"] == 5
+    assert captured["kwargs"]["horizon_hours"] == 72
+    assert captured["kwargs"]["lookback_days"] == 120
+    assert captured["kwargs"]["limit"] == 5
+
+
+def test_run_guardian_autotune_auto_evaluate_skips_when_config_disabled(monkeypatch):
+    monkeypatch.setattr(
+        api_router,
+        "_load_blueprint_yaml",
+        lambda: {
+            "guardian_autotune": {
+                "enabled": True,
+                "mode": "assist",
+                "auto_evaluate": {"enabled": False},
+            }
+        },
+    )
+    payload = asyncio.run(api_router._run_guardian_autotune_auto_evaluate(trigger="cycle"))
+    assert payload["status"] == "skipped"
+    assert payload["reason"] == "auto_evaluate_disabled"
+    assert payload["evaluated_count"] == 0
 
 
 def test_confirm_retrospective_intervention_appends_confirmation_event(monkeypatch):

@@ -3,7 +3,7 @@ import hashlib
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -125,6 +125,13 @@ class GuardianAutoTuneGuardrailsConfigRequest(BaseModel):
     min_confidence: float = 0.55
 
 
+class GuardianAutoTuneAutoEvaluateConfigRequest(BaseModel):
+    enabled: bool = True
+    horizon_hours: int = 48
+    lookback_days: int = 90
+    max_targets_per_cycle: int = 3
+
+
 class GuardianAutoTuneConfigUpdateRequest(BaseModel):
     enabled: bool = False
     mode: str = "shadow"
@@ -134,6 +141,9 @@ class GuardianAutoTuneConfigUpdateRequest(BaseModel):
     )
     guardrails: GuardianAutoTuneGuardrailsConfigRequest = Field(
         default_factory=GuardianAutoTuneGuardrailsConfigRequest
+    )
+    auto_evaluate: GuardianAutoTuneAutoEvaluateConfigRequest = Field(
+        default_factory=GuardianAutoTuneAutoEvaluateConfigRequest
     )
 
 
@@ -148,6 +158,7 @@ class GuardianAutoTuneLifecycleActionRequest(BaseModel):
     source: Optional[str] = "manual"
     reason: Optional[str] = None
     note: Optional[str] = None
+    force: bool = False
 
 
 def get_steward() -> Steward:
@@ -188,6 +199,18 @@ AUTOTUNE_EVENT_REVIEWED = "guardian_autotune_reviewed"
 AUTOTUNE_EVENT_APPLIED = "guardian_autotune_applied"
 AUTOTUNE_EVENT_REJECTED = "guardian_autotune_rejected"
 AUTOTUNE_EVENT_ROLLED_BACK = "guardian_autotune_rolled_back"
+AUTOTUNE_EVENT_EVALUATED = "guardian_autotune_evaluated"
+AUTOTUNE_EVENT_AUTO_EVALUATE_CYCLE = "guardian_autotune_auto_evaluate_cycle"
+AUTOTUNE_EVENT_ACTION_MAP = {
+    AUTOTUNE_EVENT_PROPOSED: "proposed",
+    AUTOTUNE_EVENT_REVIEWED: "reviewed",
+    AUTOTUNE_EVENT_APPLIED: "applied",
+    AUTOTUNE_EVENT_REJECTED: "rejected",
+    AUTOTUNE_EVENT_ROLLED_BACK: "rolled_back",
+    AUTOTUNE_EVENT_EVALUATED: "evaluated",
+}
+AUTOTUNE_DECISION_ACTIONS = {"reviewed", "applied", "rejected"}
+AUTOTUNE_STATUS_ACTIONS = {"proposed", "reviewed", "applied", "rejected", "rolled_back"}
 
 
 def _coerce_int(value: Any, default: int, min_value: int = 1, max_value: int = 365) -> int:
@@ -254,6 +277,12 @@ def _guardian_autotune_defaults() -> Dict[str, Any]:
             "max_int_step": 1,
             "max_float_step": 0.05,
             "min_confidence": 0.55,
+        },
+        "auto_evaluate": {
+            "enabled": True,
+            "horizon_hours": 48,
+            "lookback_days": 90,
+            "max_targets_per_cycle": 3,
         },
     }
 
@@ -419,6 +448,9 @@ def _normalized_guardian_autotune_config(raw: Optional[Dict[str, Any]] = None) -
     raw_guardrails = raw_autotune.get("guardrails", {})
     if not isinstance(raw_guardrails, dict):
         raw_guardrails = {}
+    raw_auto_evaluate = raw_autotune.get("auto_evaluate", {})
+    if not isinstance(raw_auto_evaluate, dict):
+        raw_auto_evaluate = {}
 
     return {
         "enabled": bool(raw_autotune.get("enabled", defaults["enabled"])),
@@ -470,6 +502,29 @@ def _normalized_guardian_autotune_config(raw: Optional[Dict[str, Any]] = None) -
                 2,
             ),
         },
+        "auto_evaluate": {
+            "enabled": bool(
+                raw_auto_evaluate.get("enabled", defaults["auto_evaluate"]["enabled"])
+            ),
+            "horizon_hours": _coerce_int(
+                raw_auto_evaluate.get("horizon_hours"),
+                defaults["auto_evaluate"]["horizon_hours"],
+                min_value=6,
+                max_value=168,
+            ),
+            "lookback_days": _coerce_int(
+                raw_auto_evaluate.get("lookback_days"),
+                defaults["auto_evaluate"]["lookback_days"],
+                min_value=7,
+                max_value=365,
+            ),
+            "max_targets_per_cycle": _coerce_int(
+                raw_auto_evaluate.get("max_targets_per_cycle"),
+                defaults["auto_evaluate"]["max_targets_per_cycle"],
+                min_value=1,
+                max_value=20,
+            ),
+        },
     }
 
 
@@ -506,6 +561,10 @@ def _save_guardian_autotune_config(config_payload: Dict[str, Any]) -> None:
         or {},
         "guardrails": (
             config_payload.get("guardrails") if isinstance(config_payload, dict) else {}
+        )
+        or {},
+        "auto_evaluate": (
+            config_payload.get("auto_evaluate") if isinstance(config_payload, dict) else {}
         )
         or {},
     }
@@ -598,6 +657,675 @@ def _load_events_for_days(days: int) -> list:
             if ev_time is None or ev_time >= cutoff:
                 events.append(event)
     return events
+
+
+def _autotune_event_identity(
+    payload: Any,
+    *,
+    fallback_timestamp: Any = None,
+) -> Tuple[str, str]:
+    payload_dict = payload if isinstance(payload, dict) else {}
+    proposal_id = str(payload_dict.get("proposal_id") or "").strip()
+    if not proposal_id:
+        proposal_id = _proposal_id_from_timestamp(fallback_timestamp)
+    fingerprint = str(payload_dict.get("fingerprint") or "").strip()
+    if not fingerprint:
+        fingerprint = _build_autotune_proposal_fingerprint(
+            {
+                "proposal_id": proposal_id,
+                "patch": payload_dict.get("patch")
+                if isinstance(payload_dict.get("patch"), dict)
+                else {},
+                "current_thresholds": payload_dict.get("current_thresholds"),
+                "proposed_thresholds": payload_dict.get("proposed_thresholds"),
+            }
+        )
+    return proposal_id, fingerprint
+
+
+def _load_latest_autotune_event(
+    event_type: str,
+    *,
+    proposal_id: Optional[str] = None,
+    fingerprint: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    if not EVENT_LOG_PATH.exists():
+        return None
+    target_id = str(proposal_id or "").strip()
+    target_fingerprint = str(fingerprint or "").strip()
+    with open(EVENT_LOG_PATH, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    for raw in reversed(lines):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") != event_type:
+            continue
+        payload = event.get("payload")
+        resolved_id, resolved_fingerprint = _autotune_event_identity(
+            payload,
+            fallback_timestamp=event.get("timestamp"),
+        )
+        if target_id and resolved_id != target_id:
+            continue
+        if target_fingerprint and resolved_fingerprint != target_fingerprint:
+            continue
+        return event
+    return None
+
+
+def _find_autotune_rollback_within_horizon(
+    *,
+    proposal_id: str,
+    fingerprint: str,
+    applied_at: datetime,
+    horizon_hours: int,
+) -> Optional[Dict[str, Any]]:
+    events = _load_events_for_days(max(30, int(horizon_hours / 24) + 7))
+    deadline = applied_at + timedelta(hours=horizon_hours)
+    matched: Optional[Dict[str, Any]] = None
+    matched_time: Optional[datetime] = None
+    for event in events:
+        if event.get("type") != AUTOTUNE_EVENT_ROLLED_BACK:
+            continue
+        payload = event.get("payload")
+        event_id, event_fingerprint = _autotune_event_identity(
+            payload,
+            fallback_timestamp=event.get("timestamp"),
+        )
+        if proposal_id and event_id != proposal_id:
+            continue
+        if fingerprint and event_fingerprint != fingerprint:
+            continue
+        parsed = _parse_event_timestamp(event.get("timestamp"))
+        if not isinstance(parsed, datetime):
+            continue
+        if applied_at <= parsed <= deadline:
+            if matched_time is None or parsed < matched_time:
+                matched = event
+                matched_time = parsed
+    return matched
+
+
+def _is_autotune_apply_already_evaluated(
+    *,
+    proposal_id: str,
+    fingerprint: str,
+    applied_at: str,
+) -> bool:
+    latest_evaluated = _load_latest_autotune_event(
+        AUTOTUNE_EVENT_EVALUATED,
+        proposal_id=proposal_id or None,
+        fingerprint=fingerprint or None,
+    )
+    if not isinstance(latest_evaluated, dict):
+        return False
+    payload = latest_evaluated.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    evaluated_applied_at = str(payload.get("applied_at") or "").strip()
+    if evaluated_applied_at and applied_at and evaluated_applied_at == applied_at:
+        return True
+
+    evaluated_at = _parse_event_timestamp(latest_evaluated.get("timestamp"))
+    applied_at_time = _parse_event_timestamp(applied_at)
+    if (
+        not evaluated_applied_at
+        and isinstance(evaluated_at, datetime)
+        and isinstance(applied_at_time, datetime)
+        and evaluated_at >= applied_at_time
+    ):
+        return True
+    return False
+
+
+def _pending_autotune_evaluation_targets(
+    *,
+    horizon_hours: int = 48,
+    lookback_days: int = 90,
+    limit: int = 3,
+) -> List[Dict[str, Any]]:
+    now = datetime.now()
+    horizon = timedelta(hours=_coerce_int(horizon_hours, 48, min_value=1, max_value=168))
+    max_targets = _coerce_int(limit, 3, min_value=1, max_value=20)
+    events = _load_events_for_days(_coerce_int(lookback_days, 90, min_value=1, max_value=365))
+    targets: List[Dict[str, Any]] = []
+    seen_keys = set()
+    for event in reversed(events):
+        if event.get("type") != AUTOTUNE_EVENT_APPLIED:
+            continue
+        payload = event.get("payload")
+        proposal_id, fingerprint = _autotune_event_identity(
+            payload,
+            fallback_timestamp=event.get("timestamp"),
+        )
+        key = (proposal_id, fingerprint)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+
+        applied_at = str(event.get("timestamp") or "").strip()
+        applied_at_time = _parse_event_timestamp(applied_at)
+        if not isinstance(applied_at_time, datetime):
+            continue
+        if now < applied_at_time + horizon:
+            continue
+        if _is_autotune_apply_already_evaluated(
+            proposal_id=proposal_id,
+            fingerprint=fingerprint,
+            applied_at=applied_at,
+        ):
+            continue
+        targets.append(
+            {
+                "proposal_id": proposal_id,
+                "fingerprint": fingerprint,
+                "applied_at": applied_at,
+            }
+        )
+        if len(targets) >= max_targets:
+            break
+    return targets
+
+
+def _current_human_trust_index(days: int = 7) -> Optional[float]:
+    try:
+        retrospective = build_guardian_retrospective_response(days=days)
+    except Exception:
+        return None
+    if not isinstance(retrospective, dict):
+        return None
+    north_star = retrospective.get("north_star_metrics")
+    if not isinstance(north_star, dict):
+        return None
+    trust_metric = north_star.get("human_trust_index")
+    if not isinstance(trust_metric, dict):
+        return None
+    raw_score = trust_metric.get("score")
+    if not isinstance(raw_score, (int, float)):
+        return None
+    return round(_coerce_float(raw_score, 0.0, min_value=0.0, max_value=1.0), 3)
+
+
+def _median(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(float(v) for v in values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return round(ordered[mid], 2)
+    return round((ordered[mid - 1] + ordered[mid]) / 2.0, 2)
+
+
+def _autotune_lifecycle_history_chains(days: int) -> List[Dict[str, Any]]:
+    events = _load_events_for_days(days)
+    tracked_events: List[Dict[str, Any]] = []
+    for index, event in enumerate(events):
+        event_type = str(event.get("type") or "").strip()
+        action = AUTOTUNE_EVENT_ACTION_MAP.get(event_type)
+        if not action:
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        if action == "proposed":
+            payload = _ensure_autotune_proposal_identity(
+                payload,
+                fallback_timestamp=event.get("timestamp"),
+            )
+        proposal_id = str(payload.get("proposal_id") or "").strip()
+        if not proposal_id:
+            proposal_id = _proposal_id_from_timestamp(event.get("timestamp"))
+        fingerprint = str(payload.get("fingerprint") or "").strip()
+        if not fingerprint:
+            fingerprint = _build_autotune_proposal_fingerprint(
+                {
+                    "proposal_id": proposal_id,
+                    "patch": payload.get("patch") if isinstance(payload.get("patch"), dict) else {},
+                    "current_thresholds": payload.get("current_thresholds"),
+                    "proposed_thresholds": payload.get("proposed_thresholds"),
+                }
+            )
+        tracked_events.append(
+            {
+                "index": index,
+                "event_type": event_type,
+                "action": action,
+                "timestamp": event.get("timestamp"),
+                "parsed_time": _parse_event_timestamp(event.get("timestamp")),
+                "proposal_id": proposal_id,
+                "fingerprint": fingerprint,
+                "payload": payload,
+            }
+        )
+
+    tracked_events.sort(key=lambda item: (item["parsed_time"] or datetime.min, item["index"]))
+
+    chains: Dict[str, Dict[str, Any]] = {}
+    for tracked in tracked_events:
+        proposal_id = tracked["proposal_id"]
+        fingerprint = tracked["fingerprint"]
+        key = proposal_id or fingerprint
+        chain = chains.get(key)
+        if chain is None:
+            chain = {
+                "proposal_id": proposal_id,
+                "fingerprint": fingerprint,
+                "status": "proposed",
+                "trigger": None,
+                "candidate_source": None,
+                "confidence": None,
+                "patch": {},
+                "proposed_at": None,
+                "reviewed_at": None,
+                "applied_at": None,
+                "rejected_at": None,
+                "rolled_back_at": None,
+                "evaluated_at": None,
+                "latest_action": None,
+                "latest_timestamp": None,
+                "review_turnaround_hours": None,
+                "apply_evaluation": None,
+                "trust_delta_48h": None,
+                "events": [],
+                "_proposed_time": None,
+                "_first_decision_time": None,
+                "_latest_time": None,
+                "_applied_points": [],
+                "_rollback_points": [],
+                "_latest_apply_payload": None,
+                "_latest_evaluated_payload": None,
+            }
+            chains[key] = chain
+
+        action = tracked["action"]
+        payload = tracked["payload"]
+        timestamp = tracked["timestamp"]
+        parsed_time = tracked["parsed_time"]
+
+        if payload.get("trigger"):
+            chain["trigger"] = payload.get("trigger")
+        if payload.get("candidate_source"):
+            chain["candidate_source"] = payload.get("candidate_source")
+        if payload.get("confidence") is not None:
+            chain["confidence"] = payload.get("confidence")
+        patch = payload.get("patch")
+        if isinstance(patch, dict) and patch:
+            chain["patch"] = patch
+        elif action == "proposed":
+            chain["patch"] = _build_autotune_patch_from_thresholds(
+                payload.get("current_thresholds"),
+                payload.get("proposed_thresholds"),
+            )
+
+        chain["events"].append(
+            {
+                "type": tracked["event_type"],
+                "action": action,
+                "timestamp": timestamp,
+                "actor": payload.get("actor"),
+                "source": payload.get("source"),
+                "reason": payload.get("reason"),
+                "note": payload.get("note"),
+            }
+        )
+
+        if action == "proposed" and chain["proposed_at"] is None:
+            chain["proposed_at"] = timestamp
+            chain["_proposed_time"] = parsed_time
+        elif action == "reviewed" and chain["reviewed_at"] is None:
+            chain["reviewed_at"] = timestamp
+        elif action == "applied":
+            chain["applied_at"] = timestamp
+            chain["_applied_points"].append((parsed_time, timestamp))
+            chain["_latest_apply_payload"] = payload
+        elif action == "rejected" and chain["rejected_at"] is None:
+            chain["rejected_at"] = timestamp
+        elif action == "rolled_back":
+            chain["rolled_back_at"] = timestamp
+            chain["_rollback_points"].append((parsed_time, timestamp))
+        elif action == "evaluated":
+            chain["evaluated_at"] = timestamp
+            chain["_latest_evaluated_payload"] = payload
+
+        if action in AUTOTUNE_DECISION_ACTIONS and chain["_first_decision_time"] is None:
+            chain["_first_decision_time"] = parsed_time
+        chain["latest_action"] = action
+        chain["latest_timestamp"] = timestamp
+        chain["_latest_time"] = parsed_time
+
+    now = datetime.now()
+    normalized_chains: List[Dict[str, Any]] = []
+    for chain in chains.values():
+        proposed_time = chain.get("_proposed_time")
+        first_decision_time = chain.get("_first_decision_time")
+        if (
+            isinstance(proposed_time, datetime)
+            and isinstance(first_decision_time, datetime)
+            and first_decision_time >= proposed_time
+        ):
+            chain["review_turnaround_hours"] = round(
+                (first_decision_time - proposed_time).total_seconds() / 3600.0,
+                2,
+            )
+
+        latest_apply_payload = (
+            chain.get("_latest_apply_payload")
+            if isinstance(chain.get("_latest_apply_payload"), dict)
+            else None
+        )
+        latest_evaluated_payload = (
+            chain.get("_latest_evaluated_payload")
+            if isinstance(chain.get("_latest_evaluated_payload"), dict)
+            else None
+        )
+        applied_points = [
+            item
+            for item in chain.get("_applied_points", [])
+            if isinstance(item, tuple) and len(item) == 2
+        ]
+        rollback_points = [
+            item
+            for item in chain.get("_rollback_points", [])
+            if isinstance(item, tuple) and len(item) == 2
+        ]
+        if applied_points:
+            latest_apply_time, latest_apply_ts = applied_points[-1]
+            horizon_hours = 48
+            evaluable_at = (
+                latest_apply_time + timedelta(hours=horizon_hours)
+                if isinstance(latest_apply_time, datetime)
+                else None
+            )
+            rollback_in_horizon = None
+            if isinstance(latest_apply_time, datetime):
+                for rollback_time, rollback_ts in rollback_points:
+                    if not isinstance(rollback_time, datetime):
+                        continue
+                    if latest_apply_time <= rollback_time <= (
+                        latest_apply_time + timedelta(hours=horizon_hours)
+                    ):
+                        rollback_in_horizon = rollback_ts
+                        break
+
+            if isinstance(evaluable_at, datetime) and now < evaluable_at:
+                apply_status = "pending_48h_window"
+                success_within_48h = None
+            elif rollback_in_horizon:
+                apply_status = "rolled_back_within_48h"
+                success_within_48h = False
+            else:
+                apply_status = "stable_48h"
+                success_within_48h = True
+            chain["apply_evaluation"] = {
+                "status": apply_status,
+                "success_within_48h": success_within_48h,
+                "horizon_hours": horizon_hours,
+                "applied_at": latest_apply_ts,
+                "evaluable_at": (
+                    evaluable_at.isoformat() if isinstance(evaluable_at, datetime) else None
+                ),
+                "rollback_timestamp": rollback_in_horizon,
+            }
+
+            trust_before_raw = (
+                latest_apply_payload.get("trust_index_before")
+                if isinstance(latest_apply_payload, dict)
+                else None
+            )
+            trust_after_raw = (
+                latest_apply_payload.get("trust_index_after_48h")
+                if isinstance(latest_apply_payload, dict)
+                else None
+            )
+            trust_before = (
+                _coerce_float(trust_before_raw, float(trust_before_raw), 0.0, 1.0)
+                if isinstance(trust_before_raw, (int, float))
+                else None
+            )
+            trust_after = (
+                _coerce_float(trust_after_raw, float(trust_after_raw), 0.0, 1.0)
+                if isinstance(trust_after_raw, (int, float))
+                else None
+            )
+            if trust_before is not None and trust_after is not None:
+                trust_status = "ready"
+                trust_value = round(trust_after - trust_before, 3)
+                trust_reason = None
+            elif isinstance(evaluable_at, datetime) and now < evaluable_at:
+                trust_status = "pending_48h_window"
+                trust_value = None
+                trust_reason = "not_reached_48h_window"
+            else:
+                trust_status = "unavailable"
+                trust_value = None
+                trust_reason = (
+                    "missing_trust_index_before"
+                    if trust_before is None
+                    else "missing_trust_index_after_48h"
+                )
+            chain["trust_delta_48h"] = {
+                "status": trust_status,
+                "delta": trust_value,
+                "reason": trust_reason,
+                "before": trust_before,
+                "after": trust_after,
+                "horizon_hours": 48,
+                "evaluable_at": (
+                    evaluable_at.isoformat() if isinstance(evaluable_at, datetime) else None
+                ),
+            }
+
+        if latest_evaluated_payload:
+            eval_status = str(latest_evaluated_payload.get("trust_delta_status") or "").strip()
+            eval_delta_raw = latest_evaluated_payload.get("trust_delta_48h")
+            eval_before_raw = latest_evaluated_payload.get("trust_index_before")
+            eval_after_raw = latest_evaluated_payload.get("trust_index_after_48h")
+            eval_horizon = _coerce_int(
+                latest_evaluated_payload.get("horizon_hours"),
+                48,
+                min_value=1,
+                max_value=168,
+            )
+            eval_before = (
+                _coerce_float(eval_before_raw, float(eval_before_raw), 0.0, 1.0)
+                if isinstance(eval_before_raw, (int, float))
+                else None
+            )
+            eval_after = (
+                _coerce_float(eval_after_raw, float(eval_after_raw), 0.0, 1.0)
+                if isinstance(eval_after_raw, (int, float))
+                else None
+            )
+            eval_delta = (
+                round(float(eval_delta_raw), 3)
+                if isinstance(eval_delta_raw, (int, float))
+                else None
+            )
+            eval_reason = latest_evaluated_payload.get("evaluation_reason")
+            chain["trust_delta_48h"] = {
+                "status": eval_status or "unavailable",
+                "delta": eval_delta,
+                "reason": str(eval_reason or "").strip() or None,
+                "before": eval_before,
+                "after": eval_after,
+                "horizon_hours": eval_horizon,
+                "evaluable_at": latest_evaluated_payload.get("evaluable_at"),
+            }
+            if isinstance(chain.get("apply_evaluation"), dict):
+                chain["apply_evaluation"]["status"] = str(
+                    latest_evaluated_payload.get("apply_outcome_status")
+                    or chain["apply_evaluation"].get("status")
+                    or "unknown"
+                )
+                success_flag = latest_evaluated_payload.get("success_within_48h")
+                if isinstance(success_flag, bool):
+                    chain["apply_evaluation"]["success_within_48h"] = success_flag
+                chain["apply_evaluation"]["evaluated_at"] = latest_evaluated_payload.get(
+                    "evaluated_at"
+                )
+
+        latest_action = str(chain.get("latest_action") or "").strip()
+        if latest_action in AUTOTUNE_STATUS_ACTIONS:
+            chain["status"] = latest_action
+
+        chain.pop("_proposed_time", None)
+        chain.pop("_first_decision_time", None)
+        chain.pop("_latest_time", None)
+        chain.pop("_applied_points", None)
+        chain.pop("_rollback_points", None)
+        chain.pop("_latest_apply_payload", None)
+        chain.pop("_latest_evaluated_payload", None)
+        normalized_chains.append(chain)
+
+    normalized_chains.sort(
+        key=lambda item: _parse_event_timestamp(item.get("latest_timestamp")) or datetime.min,
+        reverse=True,
+    )
+    return normalized_chains
+
+
+def _build_autotune_operational_metrics(
+    chains: List[Dict[str, Any]],
+    *,
+    window_days: int,
+) -> Dict[str, Any]:
+    status_counts = {
+        "proposed": 0,
+        "reviewed": 0,
+        "applied": 0,
+        "rejected": 0,
+        "rolled_back": 0,
+    }
+    for chain in chains:
+        status = str(chain.get("status") or "").strip()
+        if status in status_counts:
+            status_counts[status] += 1
+
+    review_values = [
+        float(chain["review_turnaround_hours"])
+        for chain in chains
+        if isinstance(chain.get("review_turnaround_hours"), (int, float))
+    ]
+    review_turnaround = {
+        "samples": len(review_values),
+        "median_hours": _median(review_values),
+    }
+
+    apply_evaluations = [
+        chain.get("apply_evaluation")
+        for chain in chains
+        if isinstance(chain.get("apply_evaluation"), dict)
+    ]
+    evaluable = [
+        item
+        for item in apply_evaluations
+        if isinstance(item.get("success_within_48h"), bool)
+    ]
+    apply_success_rate = {
+        "applied": len(apply_evaluations),
+        "evaluable": len(evaluable),
+        "successful": sum(1 for item in evaluable if item.get("success_within_48h") is True),
+        "pending": sum(
+            1
+            for item in apply_evaluations
+            if item.get("status") == "pending_48h_window"
+        ),
+        "rate": None,
+        "horizon_hours": 48,
+    }
+    if apply_success_rate["evaluable"] > 0:
+        apply_success_rate["rate"] = round(
+            apply_success_rate["successful"] / apply_success_rate["evaluable"],
+            2,
+        )
+
+    applied_count = sum(1 for chain in chains if chain.get("applied_at"))
+    rollback_count = sum(
+        1
+        for chain in chains
+        if chain.get("applied_at") and chain.get("rolled_back_at")
+    )
+    rollback_rate = {
+        "applied": applied_count,
+        "rolled_back": rollback_count,
+        "rate": round(rollback_count / applied_count, 2) if applied_count > 0 else None,
+    }
+
+    trust_records = [
+        chain.get("trust_delta_48h")
+        for chain in chains
+        if isinstance(chain.get("trust_delta_48h"), dict)
+    ]
+    trust_values = [
+        float(item["delta"])
+        for item in trust_records
+        if isinstance(item.get("delta"), (int, float))
+    ]
+    trust_delta = {
+        "samples": len(trust_values),
+        "average_delta": round(sum(trust_values) / len(trust_values), 3) if trust_values else None,
+        "pending": sum(
+            1
+            for item in trust_records
+            if item.get("status") == "pending_48h_window"
+        ),
+        "unavailable": sum(
+            1
+            for item in trust_records
+            if item.get("status") == "unavailable"
+        ),
+        "status": "ready" if trust_values else "pending" if trust_records else "unavailable",
+        "horizon_hours": 48,
+    }
+
+    return {
+        "window_days": window_days,
+        "total_proposals": len(chains),
+        "status_counts": status_counts,
+        "autotune_review_turnaround_hours": review_turnaround,
+        "autotune_apply_success_rate": apply_success_rate,
+        "autotune_rollback_rate": rollback_rate,
+        "post_apply_trust_delta_48h": trust_delta,
+    }
+
+
+def _autotune_auto_evaluate_cycle_logs(*, days: int, limit: int) -> List[Dict[str, Any]]:
+    window_days = _coerce_int(days, 14, min_value=1, max_value=90)
+    row_limit = _coerce_int(limit, 20, min_value=1, max_value=200)
+    events = _load_events_for_days(window_days)
+    logs: List[Dict[str, Any]] = []
+    for event in reversed(events):
+        if event.get("type") != AUTOTUNE_EVENT_AUTO_EVALUATE_CYCLE:
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        targets = payload.get("targets") if isinstance(payload.get("targets"), list) else []
+        errors = payload.get("errors") if isinstance(payload.get("errors"), list) else []
+        config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+        logs.append(
+            {
+                "timestamp": event.get("timestamp"),
+                "trigger": payload.get("trigger") or "cycle",
+                "status": payload.get("status"),
+                "mode": payload.get("mode"),
+                "reason": payload.get("reason"),
+                "evaluated_count": _coerce_int(payload.get("evaluated_count"), 0, 0, 9999),
+                "target_count": len(targets),
+                "error_count": len(errors),
+                "targets": targets,
+                "errors": errors,
+                "config": config,
+            }
+        )
+        if len(logs) >= row_limit:
+            break
+    return logs
 
 
 def _normalize_autotune_actor(value: Optional[str]) -> str:
@@ -1273,6 +2001,132 @@ def _run_guardian_autotune_shadow(trigger: str = "manual") -> Dict[str, Any]:
     }
 
 
+async def _run_guardian_autotune_auto_evaluate(trigger: str = "cycle") -> Dict[str, Any]:
+    config_payload = _normalized_guardian_autotune_config(_load_blueprint_yaml())
+    mode = _current_autotune_mode()
+    if not bool(config_payload.get("enabled")):
+        return {
+            "status": "disabled",
+            "mode": mode,
+            "reason": "autotune_disabled",
+            "evaluated_count": 0,
+            "targets": [],
+        }
+    auto_evaluate_cfg = (
+        config_payload.get("auto_evaluate")
+        if isinstance(config_payload.get("auto_evaluate"), dict)
+        else {}
+    )
+    auto_evaluate_enabled = bool(auto_evaluate_cfg.get("enabled", True))
+    horizon_hours = _coerce_int(auto_evaluate_cfg.get("horizon_hours"), 48, 6, 168)
+    lookback_days = _coerce_int(auto_evaluate_cfg.get("lookback_days"), 90, 7, 365)
+    max_targets_per_cycle = _coerce_int(
+        auto_evaluate_cfg.get("max_targets_per_cycle"),
+        3,
+        1,
+        20,
+    )
+    if not auto_evaluate_enabled:
+        return {
+            "status": "skipped",
+            "mode": mode,
+            "reason": "auto_evaluate_disabled",
+            "evaluated_count": 0,
+            "targets": [],
+        }
+    if mode != "assist":
+        return {
+            "status": "skipped",
+            "mode": mode,
+            "reason": "assist_mode_required",
+            "evaluated_count": 0,
+            "targets": [],
+        }
+
+    targets = _pending_autotune_evaluation_targets(
+        horizon_hours=horizon_hours,
+        lookback_days=lookback_days,
+        limit=max_targets_per_cycle,
+    )
+    if not targets:
+        return {
+            "status": "noop",
+            "mode": mode,
+            "reason": "no_due_targets",
+            "evaluated_count": 0,
+            "targets": [],
+        }
+
+    evaluations = []
+    errors = []
+    for target in targets:
+        request = GuardianAutoTuneLifecycleActionRequest(
+            proposal_id=target.get("proposal_id"),
+            fingerprint=target.get("fingerprint"),
+            actor="system_scheduler",
+            source="cycle",
+            reason=f"auto_evaluate_{str(trigger or 'cycle').strip().lower()}",
+            note=f"applied_at={target.get('applied_at')}",
+            force=False,
+        )
+        try:
+            result = await evaluate_guardian_autotune_lifecycle(request)
+            evaluations.append(
+                {
+                    "proposal_id": target.get("proposal_id"),
+                    "fingerprint": target.get("fingerprint"),
+                    "applied_at": target.get("applied_at"),
+                    "status": result.get("status"),
+                    "evaluation": result.get("evaluation"),
+                }
+            )
+        except HTTPException as exc:
+            errors.append(
+                {
+                    "proposal_id": target.get("proposal_id"),
+                    "fingerprint": target.get("fingerprint"),
+                    "status_code": exc.status_code,
+                    "detail": exc.detail,
+                }
+            )
+        except Exception as exc:
+            errors.append(
+                {
+                    "proposal_id": target.get("proposal_id"),
+                    "fingerprint": target.get("fingerprint"),
+                    "status_code": 500,
+                    "detail": str(exc),
+                }
+            )
+
+    status = "completed"
+    if evaluations and errors:
+        status = "partial"
+    elif not evaluations and errors:
+        status = "error"
+
+    return {
+        "status": status,
+        "mode": mode,
+        "reason": (
+            "auto_evaluate_completed"
+            if status in {"completed", "partial"}
+            else "auto_evaluate_failed"
+        ),
+        "evaluated_count": len(
+            [item for item in evaluations if str(item.get("status") or "") == "evaluated"]
+        ),
+        "targets": targets,
+        "results": evaluations,
+        "errors": errors,
+        "config": {
+            "horizon_hours": horizon_hours,
+            "lookback_days": lookback_days,
+            "max_targets_per_cycle": max_targets_per_cycle,
+        },
+    }
+
+
 def _autotune_lifecycle_payload(
     *,
     proposal: Dict[str, Any],
@@ -1394,11 +2248,13 @@ def _autotune_lifecycle_state_snapshot() -> Dict[str, Any]:
     latest_applied = _load_latest_event(AUTOTUNE_EVENT_APPLIED)
     latest_rejected = _load_latest_event(AUTOTUNE_EVENT_REJECTED)
     latest_rolled_back = _load_latest_event(AUTOTUNE_EVENT_ROLLED_BACK)
+    latest_evaluated = _load_latest_event(AUTOTUNE_EVENT_EVALUATED)
     return {
         "latest_reviewed": latest_reviewed,
         "latest_applied": latest_applied,
         "latest_rejected": latest_rejected,
         "latest_rolled_back": latest_rolled_back,
+        "latest_evaluated": latest_evaluated,
         "rollback_recommendation": _autotune_rollback_recommendation(),
     }
 
@@ -2173,6 +3029,17 @@ async def update_guardian_autotune_config(request: GuardianAutoTuneConfigUpdateR
                 2,
             ),
         },
+        "auto_evaluate": {
+            "enabled": bool(request.auto_evaluate.enabled),
+            "horizon_hours": _coerce_int(request.auto_evaluate.horizon_hours, 48, 6, 168),
+            "lookback_days": _coerce_int(request.auto_evaluate.lookback_days, 90, 7, 365),
+            "max_targets_per_cycle": _coerce_int(
+                request.auto_evaluate.max_targets_per_cycle,
+                3,
+                1,
+                20,
+            ),
+        },
     }
     _save_guardian_autotune_config(payload)
     append_event(
@@ -2212,6 +3079,33 @@ async def get_guardian_autotune_lifecycle_latest():
         "config": _normalized_guardian_autotune_config(_load_blueprint_yaml()),
         "proposal": proposal,
         "lifecycle": _autotune_lifecycle_state_snapshot(),
+    }
+
+
+@router.get("/guardian/autotune/lifecycle/history")
+async def get_guardian_autotune_lifecycle_history(days: int = 14, limit: int = 20):
+    window_days = _coerce_int(days, 14, min_value=1, max_value=90)
+    row_limit = _coerce_int(limit, 20, min_value=1, max_value=200)
+    chains = _autotune_lifecycle_history_chains(window_days)
+    return {
+        "window_days": window_days,
+        "limit": row_limit,
+        "total": len(chains),
+        "metrics": _build_autotune_operational_metrics(chains, window_days=window_days),
+        "history": chains[:row_limit],
+    }
+
+
+@router.get("/guardian/autotune/evaluation/logs")
+async def get_guardian_autotune_evaluation_logs(days: int = 14, limit: int = 20):
+    window_days = _coerce_int(days, 14, min_value=1, max_value=90)
+    row_limit = _coerce_int(limit, 20, min_value=1, max_value=200)
+    logs = _autotune_auto_evaluate_cycle_logs(days=window_days, limit=row_limit)
+    return {
+        "window_days": window_days,
+        "limit": row_limit,
+        "total": len(logs),
+        "logs": logs,
     }
 
 
@@ -2282,6 +3176,8 @@ async def apply_guardian_autotune_lifecycle(request: GuardianAutoTuneLifecycleAc
         after=target_after,
         event_action="apply",
     )
+    payload["trust_index_before"] = _current_human_trust_index(days=7)
+    payload["trust_index_after_48h"] = None
     payload["snapshot_id"] = f"ats_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     append_event(
         {
@@ -2333,6 +3229,175 @@ async def reject_guardian_autotune_lifecycle(request: GuardianAutoTuneLifecycleA
         "mode": mode,
         "proposal_id": proposal.get("proposal_id"),
         "fingerprint": proposal.get("fingerprint"),
+        "lifecycle": _autotune_lifecycle_state_snapshot(),
+    }
+
+
+@router.post("/guardian/autotune/lifecycle/evaluate")
+async def evaluate_guardian_autotune_lifecycle(request: GuardianAutoTuneLifecycleActionRequest):
+    mode = _ensure_autotune_mode("assist")
+    requested_id = str(request.proposal_id or "").strip()
+    requested_fingerprint = str(request.fingerprint or "").strip()
+    latest_applied = _load_latest_autotune_event(
+        AUTOTUNE_EVENT_APPLIED,
+        proposal_id=requested_id or None,
+        fingerprint=requested_fingerprint or None,
+    )
+    if not isinstance(latest_applied, dict):
+        raise HTTPException(
+            status_code=404,
+            detail="No autotune apply event available for evaluation",
+        )
+
+    applied_payload = latest_applied.get("payload")
+    if not isinstance(applied_payload, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Latest autotune apply event payload is invalid",
+        )
+
+    proposal_id, fingerprint = _autotune_event_identity(
+        applied_payload,
+        fallback_timestamp=latest_applied.get("timestamp"),
+    )
+    if requested_id and proposal_id and requested_id != proposal_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Evaluation target changed, refresh lifecycle before proceeding",
+        )
+    if requested_fingerprint and fingerprint and requested_fingerprint != fingerprint:
+        raise HTTPException(
+            status_code=409,
+            detail="Evaluation fingerprint changed, refresh lifecycle before proceeding",
+        )
+
+    applied_at = _parse_event_timestamp(latest_applied.get("timestamp"))
+    if not isinstance(applied_at, datetime):
+        raise HTTPException(
+            status_code=400,
+            detail="Latest autotune apply event timestamp is invalid",
+        )
+
+    auto_evaluate_cfg = _normalized_guardian_autotune_config(_load_blueprint_yaml()).get(
+        "auto_evaluate",
+        {},
+    )
+    if not isinstance(auto_evaluate_cfg, dict):
+        auto_evaluate_cfg = {}
+    horizon_hours = _coerce_int(auto_evaluate_cfg.get("horizon_hours"), 48, 6, 168)
+    now = datetime.now()
+    evaluable_at = applied_at + timedelta(hours=horizon_hours)
+    if now < evaluable_at and not request.force:
+        return {
+            "status": "pending_48h_window",
+            "mode": mode,
+            "proposal_id": proposal_id,
+            "fingerprint": fingerprint,
+            "evaluation": {
+                "horizon_hours": horizon_hours,
+                "applied_at": latest_applied.get("timestamp"),
+                "evaluable_at": evaluable_at.isoformat(),
+            },
+            "lifecycle": _autotune_lifecycle_state_snapshot(),
+        }
+
+    latest_evaluated = _load_latest_autotune_event(
+        AUTOTUNE_EVENT_EVALUATED,
+        proposal_id=proposal_id,
+        fingerprint=fingerprint,
+    )
+    if isinstance(latest_evaluated, dict) and not request.force:
+        return {
+            "status": "already_evaluated",
+            "mode": mode,
+            "proposal_id": proposal_id,
+            "fingerprint": fingerprint,
+            "evaluation": latest_evaluated.get("payload"),
+            "lifecycle": _autotune_lifecycle_state_snapshot(),
+        }
+
+    actor = _normalize_autotune_actor(request.actor)
+    source = _normalize_autotune_source(request.source)
+    trust_before_raw = applied_payload.get("trust_index_before")
+    trust_before = (
+        round(_coerce_float(trust_before_raw, float(trust_before_raw), 0.0, 1.0), 3)
+        if isinstance(trust_before_raw, (int, float))
+        else None
+    )
+    trust_after = _current_human_trust_index(days=7)
+    trust_delta = (
+        round(trust_after - trust_before, 3)
+        if isinstance(trust_before, float) and isinstance(trust_after, float)
+        else None
+    )
+
+    rollback_event = _find_autotune_rollback_within_horizon(
+        proposal_id=proposal_id,
+        fingerprint=fingerprint,
+        applied_at=applied_at,
+        horizon_hours=horizon_hours,
+    )
+    rollback_timestamp = (
+        rollback_event.get("timestamp") if isinstance(rollback_event, dict) else None
+    )
+    if now < evaluable_at and request.force:
+        apply_outcome_status = "forced_early"
+        success_within_48h = None
+    elif rollback_timestamp:
+        apply_outcome_status = "rolled_back_within_48h"
+        success_within_48h = False
+    else:
+        apply_outcome_status = "stable_48h"
+        success_within_48h = True
+
+    if trust_delta is not None:
+        trust_status = "ready"
+        eval_reason = None
+    elif trust_before is None:
+        trust_status = "unavailable"
+        eval_reason = "missing_trust_index_before"
+    elif trust_after is None:
+        trust_status = "unavailable"
+        eval_reason = "missing_trust_index_after_48h"
+    else:
+        trust_status = "unavailable"
+        eval_reason = "unknown"
+
+    eval_payload = {
+        "proposal_id": proposal_id,
+        "fingerprint": fingerprint,
+        "mode": mode,
+        "action": "evaluate",
+        "actor": actor,
+        "source": source,
+        "reason": str(request.reason or "").strip(),
+        "note": str(request.note or "").strip(),
+        "horizon_hours": horizon_hours,
+        "applied_at": latest_applied.get("timestamp"),
+        "evaluable_at": evaluable_at.isoformat(),
+        "evaluated_at": now.isoformat(),
+        "trust_index_before": trust_before,
+        "trust_index_after_48h": trust_after,
+        "trust_delta_48h": trust_delta,
+        "trust_delta_status": trust_status,
+        "evaluation_reason": eval_reason,
+        "apply_outcome_status": apply_outcome_status,
+        "success_within_48h": success_within_48h,
+        "rollback_timestamp": rollback_timestamp,
+    }
+    append_event(
+        {
+            "type": AUTOTUNE_EVENT_EVALUATED,
+            "timestamp": now.isoformat(),
+            "payload": eval_payload,
+        }
+    )
+    return {
+        "status": "evaluated",
+        "mode": mode,
+        "proposal_id": proposal_id,
+        "fingerprint": fingerprint,
+        "evaluation": eval_payload,
         "lifecycle": _autotune_lifecycle_state_snapshot(),
     }
 
@@ -2718,6 +3783,52 @@ async def trigger_cycle():
         autotune_result = _run_guardian_autotune_shadow(trigger="cycle")
     except Exception as exc:
         autotune_result = {"status": "error", "mode": "shadow", "reason": str(exc)}
+    try:
+        autotune_evaluation = await _run_guardian_autotune_auto_evaluate(trigger="cycle")
+    except Exception as exc:
+        autotune_evaluation = {
+            "status": "error",
+            "mode": _current_autotune_mode(),
+            "reason": str(exc),
+            "evaluated_count": 0,
+            "targets": [],
+        }
+    try:
+        append_event(
+            {
+                "type": AUTOTUNE_EVENT_AUTO_EVALUATE_CYCLE,
+                "timestamp": datetime.now().isoformat(),
+                "payload": {
+                    "trigger": "cycle",
+                    "status": autotune_evaluation.get("status"),
+                    "mode": autotune_evaluation.get("mode"),
+                    "reason": autotune_evaluation.get("reason"),
+                    "evaluated_count": _coerce_int(
+                        autotune_evaluation.get("evaluated_count"),
+                        0,
+                        0,
+                        9999,
+                    ),
+                    "targets": (
+                        autotune_evaluation.get("targets")
+                        if isinstance(autotune_evaluation.get("targets"), list)
+                        else []
+                    ),
+                    "errors": (
+                        autotune_evaluation.get("errors")
+                        if isinstance(autotune_evaluation.get("errors"), list)
+                        else []
+                    ),
+                    "config": (
+                        autotune_evaluation.get("config")
+                        if isinstance(autotune_evaluation.get("config"), dict)
+                        else {}
+                    ),
+                },
+            }
+        )
+    except Exception:
+        pass
     audit = _normalized_audit(
         raw_audit=plan.get("audit", {}),
         default_strategy="planning_cycle",
@@ -2730,6 +3841,7 @@ async def trigger_cycle():
         "generated_actions": plan.get("actions", []),
         "executed_auto_tasks": plan.get("executed_auto_tasks", []),
         "guardian_autotune": autotune_result,
+        "guardian_autotune_evaluation": autotune_evaluation,
         "audit": audit,
     }
 
