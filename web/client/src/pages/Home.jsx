@@ -90,6 +90,13 @@ export default function Home() {
     const [guardianConfigSaving, setGuardianConfigSaving] = useState(false);
     const [guardianConfigDirty, setGuardianConfigDirty] = useState(false);
     const [guardianConfigSavedAt, setGuardianConfigSavedAt] = useState(null);
+    const [guardianAutotuneConfig, setGuardianAutotuneConfig] = useState(null);
+    const [guardianAutotuneLifecycle, setGuardianAutotuneLifecycle] = useState(null);
+    const [guardianAutotuneLoading, setGuardianAutotuneLoading] = useState(false);
+    const [guardianAutotuneSaving, setGuardianAutotuneSaving] = useState(false);
+    const [guardianAutotuneDirty, setGuardianAutotuneDirty] = useState(false);
+    const [guardianAutotuneSavedAt, setGuardianAutotuneSavedAt] = useState(null);
+    const [guardianAutotuneActionLoading, setGuardianAutotuneActionLoading] = useState(false);
     const [l2SessionActionLoading, setL2SessionActionLoading] = useState(false);
     const [l2InterruptReason, setL2InterruptReason] = useState('context_switch');
     const [l2StartIntention, setL2StartIntention] = useState('');
@@ -230,6 +237,8 @@ export default function Home() {
                 setWeeklyAlignmentTrend(null);
                 setAnchorEffect(null);
                 setGuardianConfig(null);
+                setGuardianAutotuneConfig(null);
+                setGuardianAutotuneLifecycle(null);
                 const [profileRes, goalsRes, treeRes] = await Promise.allSettled([
                     api.get('/onboarding/status'),
                     api.get('/goals'),
@@ -246,12 +255,13 @@ export default function Home() {
                 if (treeRes.status === 'fulfilled') setGoalTree(treeRes.value.data.tree || []);
             }
 
-            const [tasksRes, currentRes, retroRes, effectRes, guardianConfigRes] = await Promise.allSettled([
+            const [tasksRes, currentRes, retroRes, effectRes, guardianConfigRes, autotuneLifecycleRes] = await Promise.allSettled([
                 api.get('/tasks/list'),
                 api.get('/tasks/current'),
                 api.get('/retrospective', { params: { days: 7 } }),
                 api.get('/anchor/effect'),
-                api.get('/guardian/config')
+                api.get('/guardian/config'),
+                api.get('/guardian/autotune/lifecycle/latest')
             ]);
             if (tasksRes.status === 'fulfilled') setTasks(tasksRes.value.data);
             if (currentRes.status === 'fulfilled') setCurrentTask(currentRes.value.data.task);
@@ -260,6 +270,15 @@ export default function Home() {
             if (guardianConfigRes.status === 'fulfilled') {
                 setGuardianConfig(guardianConfigRes.value.data?.config || null);
                 setGuardianConfigDirty(false);
+            }
+            if (autotuneLifecycleRes.status === 'fulfilled') {
+                const payload = autotuneLifecycleRes.value.data || {};
+                setGuardianAutotuneConfig(payload.config || null);
+                setGuardianAutotuneLifecycle({
+                    proposal: payload.proposal || null,
+                    lifecycle: payload.lifecycle || {}
+                });
+                setGuardianAutotuneDirty(false);
             }
         } catch (e) {
             console.error(e);
@@ -565,6 +584,132 @@ export default function Home() {
         }
     };
 
+    const refreshGuardianAutotuneState = async () => {
+        if (guardianAutotuneLoading) return;
+        try {
+            setGuardianAutotuneLoading(true);
+            const res = await api.get('/guardian/autotune/lifecycle/latest');
+            const payload = res.data || {};
+            setGuardianAutotuneConfig(payload.config || null);
+            setGuardianAutotuneLifecycle({
+                proposal: payload.proposal || null,
+                lifecycle: payload.lifecycle || {}
+            });
+            setGuardianAutotuneDirty(false);
+        } catch (e) {
+            console.error(e);
+            setError('刷新 Autotune 状态失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianAutotuneLoading(false);
+        }
+    };
+
+    const updateGuardianAutotuneRootField = (key, rawValue) => {
+        setGuardianAutotuneConfig((prev) => {
+            if (!prev) return prev;
+            return { ...prev, [key]: rawValue };
+        });
+        setGuardianAutotuneDirty(true);
+    };
+
+    const updateGuardianAutotuneNestedField = (section, key, rawValue) => {
+        setGuardianAutotuneConfig((prev) => {
+            if (!prev) return prev;
+            return {
+                ...prev,
+                [section]: {
+                    ...(prev?.[section] || {}),
+                    [key]: rawValue
+                }
+            };
+        });
+        setGuardianAutotuneDirty(true);
+    };
+
+    const saveGuardianAutotuneConfig = async () => {
+        if (!guardianAutotuneConfig || guardianAutotuneSaving) return;
+        try {
+            setGuardianAutotuneSaving(true);
+            setError(null);
+            const payload = {
+                enabled: Boolean(guardianAutotuneConfig.enabled ?? false),
+                mode: guardianAutotuneConfig.mode || 'shadow',
+                llm_enabled: Boolean(guardianAutotuneConfig.llm_enabled ?? true),
+                trigger: {
+                    lookback_days: Number(guardianAutotuneConfig?.trigger?.lookback_days ?? 7),
+                    min_event_count: Number(guardianAutotuneConfig?.trigger?.min_event_count ?? 20),
+                    cooldown_hours: Number(guardianAutotuneConfig?.trigger?.cooldown_hours ?? 24)
+                },
+                guardrails: {
+                    max_int_step: Number(guardianAutotuneConfig?.guardrails?.max_int_step ?? 1),
+                    max_float_step: Number(guardianAutotuneConfig?.guardrails?.max_float_step ?? 0.05),
+                    min_confidence: Number(guardianAutotuneConfig?.guardrails?.min_confidence ?? 0.55)
+                }
+            };
+            const res = await api.put('/guardian/autotune/config', payload);
+            setGuardianAutotuneConfig(res.data?.config || guardianAutotuneConfig);
+            setGuardianAutotuneDirty(false);
+            setGuardianAutotuneSavedAt(new Date().toISOString());
+            await refreshGuardianAutotuneState();
+        } catch (e) {
+            console.error(e);
+            setError('保存 Autotune 配置失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianAutotuneSaving(false);
+        }
+    };
+
+    const runGuardianAutotuneProposal = async () => {
+        if (guardianAutotuneActionLoading) return;
+        try {
+            setGuardianAutotuneActionLoading(true);
+            setError(null);
+            await api.post('/guardian/autotune/shadow/run', { trigger: 'manual' });
+            await refreshGuardianAutotuneState();
+        } catch (e) {
+            console.error(e);
+            setError('运行 Autotune 提议失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianAutotuneActionLoading(false);
+        }
+    };
+
+    const runGuardianAutotuneLifecycleAction = async (action) => {
+        if (guardianAutotuneActionLoading) return;
+        const proposal = guardianAutotuneLifecycle?.proposal || {};
+        const latestApplied = guardianAutotuneLifecycle?.lifecycle?.latest_applied?.payload || {};
+        const proposalId = action === 'rollback'
+            ? (latestApplied.proposal_id || null)
+            : (proposal.proposal_id || null);
+        const fingerprint = action === 'rollback'
+            ? (latestApplied.fingerprint || null)
+            : (proposal.fingerprint || null);
+        const reasonMap = {
+            review: 'manual_review',
+            apply: 'manual_apply',
+            reject: 'manual_reject',
+            rollback: 'manual_rollback'
+        };
+        try {
+            setGuardianAutotuneActionLoading(true);
+            setError(null);
+            await api.post(`/guardian/autotune/lifecycle/${action}`, {
+                proposal_id: proposalId,
+                fingerprint,
+                actor: 'home_dashboard',
+                source: 'manual',
+                reason: reasonMap[action] || 'manual_action'
+            });
+            await refreshGuardianAutotuneState();
+            await fetchAll();
+        } catch (e) {
+            console.error(e);
+            setError(`执行 Autotune ${action} 失败: ` + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianAutotuneActionLoading(false);
+        }
+    };
+
     const getGoalProgress = (goalId) => {
         const goalTasks = [...(tasks.pending || []), ...(tasks.completed || [])].filter((t) => t.goal_id === goalId);
         const completedCount = (tasks.completed || []).filter((t) => t.goal_id === goalId).length;
@@ -738,6 +883,25 @@ export default function Home() {
     const guardianThresholds = guardianConfig?.thresholds || {};
     const deviationCfg = guardianThresholds.deviation_signals || {};
     const l2Cfg = guardianThresholds.l2_protection || {};
+    const guardianAutotuneTriggerCfg = guardianAutotuneConfig?.trigger || {};
+    const guardianAutotuneGuardrailsCfg = guardianAutotuneConfig?.guardrails || {};
+    const guardianAutotuneMode = guardianAutotuneConfig?.mode || 'shadow';
+    const guardianAutotuneAssistMode = guardianAutotuneMode === 'assist';
+    const guardianAutotuneProposal = guardianAutotuneLifecycle?.proposal || null;
+    const guardianAutotuneLifecycleData = guardianAutotuneLifecycle?.lifecycle || {};
+    const guardianAutotunePatchItems = guardianAutotuneProposal?.patch
+        ? Object.entries(guardianAutotuneProposal.patch)
+        : [];
+    const guardianAutotuneLatestApplied = guardianAutotuneLifecycleData?.latest_applied?.payload || {};
+    const guardianAutotuneRollbackRec = guardianAutotuneLifecycleData?.rollback_recommendation || {};
+    const guardianAutotuneCanReview = Boolean(guardianAutotuneProposal?.proposal_id)
+        && guardianAutotuneAssistMode;
+    const guardianAutotuneCanApply = Boolean(guardianAutotuneProposal?.proposal_id)
+        && guardianAutotuneAssistMode;
+    const guardianAutotuneCanReject = Boolean(guardianAutotuneProposal?.proposal_id)
+        && guardianAutotuneAssistMode;
+    const guardianAutotuneCanRollback = Boolean(guardianAutotuneLatestApplied?.proposal_id)
+        && guardianAutotuneAssistMode;
     const blueprintNarrative = retrospective?.blueprint_narrative || {};
     const blueprintDimensions = blueprintNarrative?.dimensions || {};
     const blueprintNarrativeCard = blueprintNarrative?.narrative_card || {};
@@ -1705,6 +1869,214 @@ export default function Home() {
                                     上次保存: {guardianConfigSavedAt}
                                 </div>
                             )}
+                        </div>
+
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Guardian Autotune 治理</div>
+                                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={refreshGuardianAutotuneState}
+                                        disabled={guardianAutotuneLoading || guardianAutotuneSaving || guardianAutotuneActionLoading}
+                                        style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                    >
+                                        {guardianAutotuneLoading ? '刷新中...' : '刷新'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn btn-primary"
+                                        onClick={saveGuardianAutotuneConfig}
+                                        disabled={!guardianAutotuneDirty || guardianAutotuneSaving}
+                                        style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                    >
+                                        {guardianAutotuneSaving ? '保存中...' : '保存配置'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={runGuardianAutotuneProposal}
+                                        disabled={guardianAutotuneActionLoading}
+                                        style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                    >
+                                        {guardianAutotuneActionLoading ? '执行中...' : '生成提议'}
+                                    </button>
+                                </div>
+                            </div>
+
+                            {guardianAutotuneConfig ? (
+                                <div style={{ marginTop: '0.5rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.45rem' }}>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        模式
+                                        <select
+                                            value={guardianAutotuneMode}
+                                            onChange={(e) => updateGuardianAutotuneRootField('mode', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        >
+                                            <option value="shadow">shadow</option>
+                                            <option value="assist">assist</option>
+                                        </select>
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        Lookback 天数
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            max="30"
+                                            value={guardianAutotuneTriggerCfg.lookback_days ?? 7}
+                                            onChange={(e) => updateGuardianAutotuneNestedField('trigger', 'lookback_days', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        最小事件量
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            value={guardianAutotuneTriggerCfg.min_event_count ?? 20}
+                                            onChange={(e) => updateGuardianAutotuneNestedField('trigger', 'min_event_count', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        冷却小时
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            value={guardianAutotuneTriggerCfg.cooldown_hours ?? 24}
+                                            onChange={(e) => updateGuardianAutotuneNestedField('trigger', 'cooldown_hours', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        最低置信度
+                                        <input
+                                            type="number"
+                                            min="0"
+                                            max="1"
+                                            step="0.01"
+                                            value={guardianAutotuneGuardrailsCfg.min_confidence ?? 0.55}
+                                            onChange={(e) => updateGuardianAutotuneNestedField('guardrails', 'min_confidence', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'flex', gap: '0.35rem', alignItems: 'center', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={Boolean(guardianAutotuneConfig.enabled)}
+                                            onChange={(e) => updateGuardianAutotuneRootField('enabled', e.target.checked)}
+                                        />
+                                        启用自动调参
+                                    </label>
+                                    <label style={{ display: 'flex', gap: '0.35rem', alignItems: 'center', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={Boolean(guardianAutotuneConfig.llm_enabled)}
+                                            onChange={(e) => updateGuardianAutotuneRootField('llm_enabled', e.target.checked)}
+                                        />
+                                        启用 LLM 候选
+                                    </label>
+                                </div>
+                            ) : (
+                                <div style={{ marginTop: '0.45rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    当前无法加载 Autotune 配置，点击“刷新”重试。
+                                </div>
+                            )}
+
+                            {guardianAutotuneSavedAt && (
+                                <div style={{ marginTop: '0.35rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                    上次保存: {guardianAutotuneSavedAt}
+                                </div>
+                            )}
+
+                            <div style={{ marginTop: '0.55rem', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.5rem' }}>
+                                <div style={{ fontSize: '0.75rem', fontWeight: 600 }}>最新提议</div>
+                                {guardianAutotuneProposal ? (
+                                    <div style={{ marginTop: '0.3rem', display: 'grid', gap: '0.28rem' }}>
+                                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            proposal_id: {guardianAutotuneProposal.proposal_id || '--'} · confidence: {guardianAutotuneProposal.confidence ?? '--'} · source: {guardianAutotuneProposal.candidate_source || '--'}
+                                        </div>
+                                        <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                            fingerprint: {guardianAutotuneProposal.fingerprint || '--'}
+                                        </div>
+                                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            reason: {guardianAutotuneProposal.reason || '--'}
+                                        </div>
+                                        {guardianAutotunePatchItems.length > 0 && (
+                                            <div style={{ display: 'grid', gap: '0.2rem' }}>
+                                                {guardianAutotunePatchItems.map(([key, delta]) => (
+                                                    <div key={`autotune_patch_${key}`} style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                                        {key}: {delta?.from ?? '--'} → {delta?.to ?? '--'}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                        {!guardianAutotuneAssistMode && (
+                                            <div style={{ fontSize: '0.72rem', color: '#fcd34d' }}>
+                                                当前 mode=shadow，仅提议不执行。切换到 assist 后可执行 review/apply/reject/rollback。
+                                            </div>
+                                        )}
+                                        <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                            <button
+                                                type="button"
+                                                className="btn btn-secondary"
+                                                onClick={() => runGuardianAutotuneLifecycleAction('review')}
+                                                disabled={!guardianAutotuneCanReview || guardianAutotuneActionLoading}
+                                                style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                            >
+                                                Review
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="btn btn-primary"
+                                                onClick={() => runGuardianAutotuneLifecycleAction('apply')}
+                                                disabled={!guardianAutotuneCanApply || guardianAutotuneActionLoading}
+                                                style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                            >
+                                                Apply
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="btn btn-secondary"
+                                                onClick={() => runGuardianAutotuneLifecycleAction('reject')}
+                                                disabled={!guardianAutotuneCanReject || guardianAutotuneActionLoading}
+                                                style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                            >
+                                                Reject
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="btn btn-secondary"
+                                                onClick={() => runGuardianAutotuneLifecycleAction('rollback')}
+                                                disabled={!guardianAutotuneCanRollback || guardianAutotuneActionLoading}
+                                                style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                            >
+                                                Rollback
+                                            </button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div style={{ marginTop: '0.25rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        暂无可用提议，点击“生成提议”触发一次手动运行。
+                                    </div>
+                                )}
+                            </div>
+
+                            <div style={{ marginTop: '0.5rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                回滚建议: {guardianAutotuneRollbackRec?.should_rollback ? '建议回滚' : '无需回滚'}
+                                {guardianAutotuneRollbackRec?.reasons?.length > 0
+                                    ? ` · ${guardianAutotuneRollbackRec.reasons.join(' / ')}`
+                                    : ''}
+                            </div>
                         </div>
 
                         {retrospective.display && retrospective.suggestion && (

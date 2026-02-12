@@ -96,3 +96,57 @@ python tools/validate_event_replay.py --strict
 python tools/migrate_event_log_schema.py
 python tools/migrate_event_log_schema.py --apply
 ```
+
+## Guardian Autotune Operation
+
+### Modes
+
+- `shadow`  
+  Generate proposals only, no lifecycle apply actions.
+
+- `assist`  
+  Keep proposal generation and enable lifecycle governance APIs
+  (`review/apply/reject/rollback`) with manual operator control.
+
+### Config API
+
+- `GET /api/v1/guardian/autotune/config`
+- `PUT /api/v1/guardian/autotune/config`
+
+Main fields:
+
+- `enabled`
+- `mode` (`shadow | assist`)
+- `llm_enabled`
+- `trigger.lookback_days`
+- `trigger.min_event_count`
+- `trigger.cooldown_hours`
+- `guardrails.max_int_step`
+- `guardrails.max_float_step`
+- `guardrails.min_confidence`
+
+### Lifecycle API
+
+- `GET /api/v1/guardian/autotune/lifecycle/latest`
+- `POST /api/v1/guardian/autotune/lifecycle/review`
+- `POST /api/v1/guardian/autotune/lifecycle/apply`
+- `POST /api/v1/guardian/autotune/lifecycle/reject`
+- `POST /api/v1/guardian/autotune/lifecycle/rollback`
+
+Lifecycle request body supports:
+
+- `proposal_id`
+- `fingerprint`
+- `actor`
+- `source`
+- `reason`
+- `note`
+
+### Operational Notes
+
+- Lifecycle actions require `mode=assist`; otherwise API returns `409`.
+- Apply records before/after threshold snapshots and supports one-step rollback.
+- Lifecycle snapshot includes `rollback_recommendation` based on:
+  - guardian safe mode active
+  - low trust index
+  - negative weekly alignment delta

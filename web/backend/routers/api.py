@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -140,6 +141,15 @@ class GuardianAutoTuneRunRequest(BaseModel):
     trigger: str = "manual"
 
 
+class GuardianAutoTuneLifecycleActionRequest(BaseModel):
+    proposal_id: Optional[str] = None
+    fingerprint: Optional[str] = None
+    actor: Optional[str] = "human_operator"
+    source: Optional[str] = "manual"
+    reason: Optional[str] = None
+    note: Optional[str] = None
+
+
 def get_steward() -> Steward:
     state = ensure_tick_applied()
     registry = GoalRegistry()
@@ -172,7 +182,12 @@ ALLOWED_L2_SESSION_INTERRUPT_REASONS = {
     "tooling_blocked",
     "other",
 }
-ALLOWED_GUARDIAN_AUTOTUNE_MODES = {"shadow"}
+ALLOWED_GUARDIAN_AUTOTUNE_MODES = {"shadow", "assist"}
+AUTOTUNE_EVENT_PROPOSED = "guardian_autotune_shadow_proposed"
+AUTOTUNE_EVENT_REVIEWED = "guardian_autotune_reviewed"
+AUTOTUNE_EVENT_APPLIED = "guardian_autotune_applied"
+AUTOTUNE_EVENT_REJECTED = "guardian_autotune_rejected"
+AUTOTUNE_EVENT_ROLLED_BACK = "guardian_autotune_rolled_back"
 
 
 def _coerce_int(value: Any, default: int, min_value: int = 1, max_value: int = 365) -> int:
@@ -585,6 +600,221 @@ def _load_events_for_days(days: int) -> list:
     return events
 
 
+def _normalize_autotune_actor(value: Optional[str]) -> str:
+    text = str(value or "").strip()
+    return text[:64] if text else "human_operator"
+
+
+def _normalize_autotune_source(value: Optional[str]) -> str:
+    text = str(value or "").strip().lower()
+    return text[:32] if text else "manual"
+
+
+def _current_autotune_mode() -> str:
+    config = _normalized_guardian_autotune_config(_load_blueprint_yaml())
+    mode = str(config.get("mode") or "shadow").strip().lower()
+    if mode in ALLOWED_GUARDIAN_AUTOTUNE_MODES:
+        return mode
+    return "shadow"
+
+
+def _ensure_autotune_mode(*allowed_modes: str) -> str:
+    mode = _current_autotune_mode()
+    allowed = {str(item).strip().lower() for item in allowed_modes if str(item).strip()}
+    if allowed and mode not in allowed:
+        allowed_text = " | ".join(sorted(allowed))
+        raise HTTPException(
+            status_code=409,
+            detail=f"guardian_autotune.mode must be one of {allowed_text}",
+        )
+    return mode
+
+
+def _sanitize_guardian_thresholds_payload(raw_thresholds: Any) -> Dict[str, Any]:
+    if not isinstance(raw_thresholds, dict):
+        raw_thresholds = {}
+    normalized = _normalized_guardian_config({"guardian_thresholds": raw_thresholds})
+    thresholds = normalized.get("thresholds")
+    if isinstance(thresholds, dict):
+        return thresholds
+    return _guardian_config_defaults()["thresholds"]
+
+
+def _flatten_guardian_thresholds(thresholds: Any) -> Dict[str, Any]:
+    thresholds = _sanitize_guardian_thresholds_payload(thresholds)
+    deviation = thresholds.get("deviation_signals", {})
+    l2 = thresholds.get("l2_protection", {})
+    if not isinstance(deviation, dict):
+        deviation = {}
+    if not isinstance(l2, dict):
+        l2 = {}
+    return {
+        "repeated_skip": _coerce_int(deviation.get("repeated_skip"), 2, min_value=1, max_value=8),
+        "l2_interruption": _coerce_int(
+            deviation.get("l2_interruption"),
+            1,
+            min_value=1,
+            max_value=6,
+        ),
+        "stagnation_days": _coerce_int(
+            deviation.get("stagnation_days"),
+            3,
+            min_value=1,
+            max_value=14,
+        ),
+        "l2_high": round(_coerce_float(l2.get("high"), 0.75, min_value=0.55, max_value=0.95), 2),
+        "l2_medium": round(
+            _coerce_float(l2.get("medium"), 0.50, min_value=0.30, max_value=0.85),
+            2,
+        ),
+    }
+
+
+def _build_autotune_patch_from_thresholds(before: Any, after: Any) -> Dict[str, Any]:
+    before_flat = _flatten_guardian_thresholds(before)
+    after_flat = _flatten_guardian_thresholds(after)
+    patch = {}
+    for key, from_value in before_flat.items():
+        to_value = after_flat.get(key)
+        if to_value != from_value:
+            patch[key] = {"from": from_value, "to": to_value}
+    return patch
+
+
+def _thresholds_match(left: Any, right: Any) -> bool:
+    return _flatten_guardian_thresholds(left) == _flatten_guardian_thresholds(right)
+
+
+def _build_autotune_proposal_fingerprint(proposal_payload: Dict[str, Any]) -> str:
+    canonical = {
+        "proposal_id": str(proposal_payload.get("proposal_id") or ""),
+        "patch": (
+            proposal_payload.get("patch")
+            if isinstance(proposal_payload.get("patch"), dict)
+            else {}
+        ),
+        "current_thresholds": _sanitize_guardian_thresholds_payload(
+            proposal_payload.get("current_thresholds")
+        ),
+        "proposed_thresholds": _sanitize_guardian_thresholds_payload(
+            proposal_payload.get("proposed_thresholds")
+        ),
+    }
+    serialized = json.dumps(canonical, ensure_ascii=False, sort_keys=True)
+    digest = hashlib.sha1(serialized.encode("utf-8")).hexdigest()[:16]
+    return f"gatfp_{digest}"
+
+
+def _proposal_id_from_timestamp(raw_ts: Any) -> str:
+    if isinstance(raw_ts, str):
+        digits = "".join(ch for ch in raw_ts if ch.isdigit())
+        if digits:
+            return f"atp_{digits[:14]}"
+    return f"atp_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+
+def _ensure_autotune_proposal_identity(
+    proposal_payload: Dict[str, Any],
+    *,
+    fallback_timestamp: Any = None,
+) -> Dict[str, Any]:
+    proposal = dict(proposal_payload) if isinstance(proposal_payload, dict) else {}
+    proposal_id = str(proposal.get("proposal_id") or "").strip()
+    if not proposal_id:
+        proposal_id = _proposal_id_from_timestamp(fallback_timestamp)
+    proposal["proposal_id"] = proposal_id
+
+    proposal["current_thresholds"] = _sanitize_guardian_thresholds_payload(
+        proposal.get("current_thresholds")
+    )
+    proposal["proposed_thresholds"] = _sanitize_guardian_thresholds_payload(
+        proposal.get("proposed_thresholds")
+    )
+
+    raw_patch = proposal.get("patch")
+    if not isinstance(raw_patch, dict) or not raw_patch:
+        proposal["patch"] = _build_autotune_patch_from_thresholds(
+            proposal["current_thresholds"],
+            proposal["proposed_thresholds"],
+        )
+
+    fingerprint = str(proposal.get("fingerprint") or "").strip()
+    if not fingerprint:
+        fingerprint = _build_autotune_proposal_fingerprint(proposal)
+    proposal["fingerprint"] = fingerprint
+    proposal["lifecycle_status"] = str(proposal.get("lifecycle_status") or "proposed")
+    return proposal
+
+
+def _load_latest_autotune_proposal_context() -> Optional[Dict[str, Any]]:
+    event = _load_latest_event(AUTOTUNE_EVENT_PROPOSED)
+    if not isinstance(event, dict):
+        return None
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    proposal = _ensure_autotune_proposal_identity(
+        payload,
+        fallback_timestamp=event.get("timestamp"),
+    )
+    return {
+        "event": event,
+        "proposal": proposal,
+    }
+
+
+def _resolve_autotune_proposal_or_raise(
+    *,
+    proposal_id: Optional[str],
+    fingerprint: Optional[str],
+) -> Dict[str, Any]:
+    context = _load_latest_autotune_proposal_context()
+    if not context:
+        raise HTTPException(status_code=404, detail="No autotune proposal available")
+
+    proposal = context["proposal"]
+    current_id = str(proposal.get("proposal_id") or "").strip()
+    current_fingerprint = str(proposal.get("fingerprint") or "").strip()
+    requested_id = str(proposal_id or "").strip()
+    requested_fingerprint = str(fingerprint or "").strip()
+
+    if requested_id and requested_id != current_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Autotune proposal changed, refresh before proceeding",
+        )
+    if requested_fingerprint and requested_fingerprint != current_fingerprint:
+        raise HTTPException(
+            status_code=409,
+            detail="Autotune proposal fingerprint changed, refresh before proceeding",
+        )
+    return context
+
+
+def _current_guardian_thresholds() -> Dict[str, Any]:
+    config = _normalized_guardian_config(_load_blueprint_yaml())
+    raw = config.get("thresholds") if isinstance(config, dict) else {}
+    return _sanitize_guardian_thresholds_payload(raw)
+
+
+def _persist_guardian_thresholds(thresholds: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = _normalize_guardian_config_for_save(thresholds)
+    _save_guardian_config(normalized)
+    return normalized
+
+
+def _normalize_guardian_config_for_save(thresholds: Dict[str, Any]) -> Dict[str, Any]:
+    current_config = _normalized_guardian_config(_load_blueprint_yaml())
+    authority = current_config.get("authority")
+    if not isinstance(authority, dict):
+        authority = _guardian_config_defaults()["authority"]
+    return {
+        "intervention_level": str(current_config.get("intervention_level") or "SOFT"),
+        "thresholds": _sanitize_guardian_thresholds_payload(thresholds),
+        "authority": authority,
+    }
+
+
 def _clamp_step_int(
     *,
     current: int,
@@ -908,12 +1138,13 @@ def _run_guardian_autotune_shadow(trigger: str = "manual") -> Dict[str, Any]:
     now = datetime.now()
     raw = _load_blueprint_yaml()
     config_payload = _normalized_guardian_autotune_config(raw)
+    mode = str(config_payload.get("mode") or "shadow").strip().lower()
     if not config_payload.get("enabled"):
-        return {"status": "disabled", "mode": "shadow", "reason": "autotune_disabled"}
-    if config_payload.get("mode") != "shadow":
+        return {"status": "disabled", "mode": mode, "reason": "autotune_disabled"}
+    if mode not in ALLOWED_GUARDIAN_AUTOTUNE_MODES:
         return {
             "status": "skipped",
-            "mode": config_payload.get("mode"),
+            "mode": mode,
             "reason": "unsupported_mode",
         }
 
@@ -923,12 +1154,12 @@ def _run_guardian_autotune_shadow(trigger: str = "manual") -> Dict[str, Any]:
         min_value=1,
         max_value=168,
     )
-    latest = _load_latest_event("guardian_autotune_shadow_proposed")
+    latest = _load_latest_event(AUTOTUNE_EVENT_PROPOSED)
     latest_time = _parse_event_timestamp((latest or {}).get("timestamp"))
     if latest_time and now - latest_time < timedelta(hours=cooldown_hours):
         return {
             "status": "skipped",
-            "mode": "shadow",
+            "mode": mode,
             "reason": "cooldown_active",
             "cooldown_hours": cooldown_hours,
             "next_eligible_at": (latest_time + timedelta(hours=cooldown_hours)).isoformat(),
@@ -950,7 +1181,7 @@ def _run_guardian_autotune_shadow(trigger: str = "manual") -> Dict[str, Any]:
     if len(events) < min_event_count:
         return {
             "status": "skipped",
-            "mode": "shadow",
+            "mode": mode,
             "reason": "insufficient_event_volume",
             "event_count": len(events),
             "required_event_count": min_event_count,
@@ -994,46 +1225,181 @@ def _run_guardian_autotune_shadow(trigger: str = "manual") -> Dict[str, Any]:
     if not patch:
         return {
             "status": "skipped",
-            "mode": "shadow",
+            "mode": mode,
             "reason": "no_effective_delta",
             "candidate_source": selected.get("source"),
         }
 
-    proposal = {
-        "trigger": str(trigger or "manual"),
-        "lookback_days": lookback_days,
-        "event_count": len(events),
-        "candidate_source": selected.get("source"),
-        "confidence": round(
-            _coerce_float(selected.get("confidence"), 0.0, min_value=0.0, max_value=1.0),
-            2,
-        ),
-        "reason": str(selected.get("reason") or ""),
-        "patch": patch,
-        "proposed_thresholds": {
-            "deviation_signals": {
-                "repeated_skip": sanitized_candidate["repeated_skip"],
-                "l2_interruption": sanitized_candidate["l2_interruption"],
-                "stagnation_days": sanitized_candidate["stagnation_days"],
+    proposal = _ensure_autotune_proposal_identity(
+        {
+            "proposal_id": f"atp_{now.strftime('%Y%m%d%H%M%S')}",
+            "lifecycle_status": "proposed",
+            "trigger": str(trigger or "manual"),
+            "lookback_days": lookback_days,
+            "event_count": len(events),
+            "candidate_source": selected.get("source"),
+            "confidence": round(
+                _coerce_float(selected.get("confidence"), 0.0, min_value=0.0, max_value=1.0),
+                2,
+            ),
+            "reason": str(selected.get("reason") or ""),
+            "patch": patch,
+            "proposed_thresholds": {
+                "deviation_signals": {
+                    "repeated_skip": sanitized_candidate["repeated_skip"],
+                    "l2_interruption": sanitized_candidate["l2_interruption"],
+                    "stagnation_days": sanitized_candidate["stagnation_days"],
+                },
+                "l2_protection": {
+                    "high": sanitized_candidate["l2_high"],
+                    "medium": sanitized_candidate["l2_medium"],
+                },
             },
-            "l2_protection": {
-                "high": sanitized_candidate["l2_high"],
-                "medium": sanitized_candidate["l2_medium"],
-            },
+            "current_thresholds": current_config.get("thresholds", {}),
         },
-        "current_thresholds": current_config.get("thresholds", {}),
-    }
+        fallback_timestamp=now.isoformat(),
+    )
     append_event(
         {
-            "type": "guardian_autotune_shadow_proposed",
+            "type": AUTOTUNE_EVENT_PROPOSED,
             "timestamp": now.isoformat(),
             "payload": proposal,
         }
     )
     return {
         "status": "proposed",
-        "mode": "shadow",
+        "mode": mode,
         "proposal": proposal,
+    }
+
+
+def _autotune_lifecycle_payload(
+    *,
+    proposal: Dict[str, Any],
+    actor: str,
+    source: str,
+    reason: Optional[str],
+    note: Optional[str],
+    before: Any,
+    after: Any,
+    event_action: str,
+) -> Dict[str, Any]:
+    before_thresholds = _sanitize_guardian_thresholds_payload(before)
+    after_thresholds = _sanitize_guardian_thresholds_payload(after)
+    mode = _current_autotune_mode()
+    return {
+        "proposal_id": proposal.get("proposal_id"),
+        "fingerprint": proposal.get("fingerprint"),
+        "mode": mode,
+        "action": event_action,
+        "actor": actor,
+        "source": source,
+        "reason": str(reason or "").strip(),
+        "note": str(note or "").strip(),
+        "diff": _build_autotune_patch_from_thresholds(before_thresholds, after_thresholds),
+        "before": before_thresholds,
+        "after": after_thresholds,
+        "trigger": proposal.get("trigger"),
+        "candidate_source": proposal.get("candidate_source"),
+        "confidence": proposal.get("confidence"),
+    }
+
+
+def _autotune_rollback_recommendation() -> Dict[str, Any]:
+    latest_applied = _load_latest_event(AUTOTUNE_EVENT_APPLIED)
+    if not isinstance(latest_applied, dict):
+        return {
+            "should_rollback": False,
+            "reasons": [],
+            "reason_code": "no_applied_event",
+        }
+
+    payload = latest_applied.get("payload")
+    if not isinstance(payload, dict):
+        return {
+            "should_rollback": False,
+            "reasons": [],
+            "reason_code": "invalid_applied_payload",
+        }
+
+    applied_after = _sanitize_guardian_thresholds_payload(payload.get("after"))
+    current_thresholds = _current_guardian_thresholds()
+    if not _thresholds_match(current_thresholds, applied_after):
+        return {
+            "should_rollback": False,
+            "reasons": [],
+            "reason_code": "threshold_state_drifted",
+        }
+
+    try:
+        retrospective = build_guardian_retrospective_response(days=7)
+    except Exception:
+        retrospective = {}
+    if not isinstance(retrospective, dict):
+        retrospective = {}
+
+    north_star = retrospective.get("north_star_metrics")
+    if not isinstance(north_star, dict):
+        north_star = {}
+    trust_metric = north_star.get("human_trust_index")
+    if not isinstance(trust_metric, dict):
+        trust_metric = {}
+    alignment_metric = north_star.get("alignment_delta_weekly")
+    if not isinstance(alignment_metric, dict):
+        alignment_metric = {}
+
+    authority = retrospective.get("authority")
+    if not isinstance(authority, dict):
+        authority = {}
+    safe_mode = authority.get("safe_mode")
+    if not isinstance(safe_mode, dict):
+        safe_mode = {}
+
+    trust_score_raw = trust_metric.get("score")
+    trust_score = (
+        _coerce_float(trust_score_raw, 0.0, min_value=0.0, max_value=1.0)
+        if isinstance(trust_score_raw, (int, float))
+        else None
+    )
+    alignment_delta_raw = alignment_metric.get("delta")
+    alignment_delta = (
+        float(alignment_delta_raw)
+        if isinstance(alignment_delta_raw, (int, float))
+        else None
+    )
+    safe_mode_active = bool(safe_mode.get("active"))
+
+    reasons = []
+    if safe_mode_active:
+        reasons.append("guardian_safe_mode_active")
+    if trust_score is not None and trust_score < 0.6:
+        reasons.append("low_human_trust_index")
+    if alignment_delta is not None and alignment_delta < 0:
+        reasons.append("negative_alignment_delta")
+
+    return {
+        "should_rollback": bool(reasons),
+        "reasons": reasons,
+        "reason_code": "triggered" if reasons else "stable",
+        "proposal_id": payload.get("proposal_id"),
+        "fingerprint": payload.get("fingerprint"),
+        "trust_score": trust_score,
+        "alignment_delta_weekly": alignment_delta,
+        "safe_mode_active": safe_mode_active,
+    }
+
+
+def _autotune_lifecycle_state_snapshot() -> Dict[str, Any]:
+    latest_reviewed = _load_latest_event(AUTOTUNE_EVENT_REVIEWED)
+    latest_applied = _load_latest_event(AUTOTUNE_EVENT_APPLIED)
+    latest_rejected = _load_latest_event(AUTOTUNE_EVENT_REJECTED)
+    latest_rolled_back = _load_latest_event(AUTOTUNE_EVENT_ROLLED_BACK)
+    return {
+        "latest_reviewed": latest_reviewed,
+        "latest_applied": latest_applied,
+        "latest_rejected": latest_rejected,
+        "latest_rolled_back": latest_rolled_back,
+        "rollback_recommendation": _autotune_rollback_recommendation(),
     }
 
 
@@ -1785,7 +2151,7 @@ async def update_guardian_autotune_config(request: GuardianAutoTuneConfigUpdateR
     if mode not in ALLOWED_GUARDIAN_AUTOTUNE_MODES:
         raise HTTPException(
             status_code=400,
-            detail="mode must be 'shadow'",
+            detail="mode must be 'shadow' or 'assist'",
         )
     payload = {
         "enabled": bool(request.enabled),
@@ -1825,7 +2191,7 @@ async def update_guardian_autotune_config(request: GuardianAutoTuneConfigUpdateR
 
 @router.get("/guardian/autotune/shadow/latest")
 async def get_guardian_autotune_shadow_latest():
-    latest = _load_latest_event("guardian_autotune_shadow_proposed")
+    latest = _load_latest_event(AUTOTUNE_EVENT_PROPOSED)
     return {
         "config": _normalized_guardian_autotune_config(_load_blueprint_yaml()),
         "latest": latest,
@@ -1836,6 +2202,225 @@ async def get_guardian_autotune_shadow_latest():
 async def run_guardian_autotune_shadow(request: Optional[GuardianAutoTuneRunRequest] = None):
     trigger = request.trigger if isinstance(request, GuardianAutoTuneRunRequest) else "manual"
     return _run_guardian_autotune_shadow(trigger=trigger)
+
+
+@router.get("/guardian/autotune/lifecycle/latest")
+async def get_guardian_autotune_lifecycle_latest():
+    context = _load_latest_autotune_proposal_context()
+    proposal = context.get("proposal") if isinstance(context, dict) else None
+    return {
+        "config": _normalized_guardian_autotune_config(_load_blueprint_yaml()),
+        "proposal": proposal,
+        "lifecycle": _autotune_lifecycle_state_snapshot(),
+    }
+
+
+@router.post("/guardian/autotune/lifecycle/review")
+async def review_guardian_autotune_lifecycle(request: GuardianAutoTuneLifecycleActionRequest):
+    mode = _ensure_autotune_mode("assist")
+    context = _resolve_autotune_proposal_or_raise(
+        proposal_id=request.proposal_id,
+        fingerprint=request.fingerprint,
+    )
+    proposal = context["proposal"]
+    actor = _normalize_autotune_actor(request.actor)
+    source = _normalize_autotune_source(request.source)
+    payload = _autotune_lifecycle_payload(
+        proposal=proposal,
+        actor=actor,
+        source=source,
+        reason=request.reason,
+        note=request.note,
+        before=proposal.get("current_thresholds"),
+        after=proposal.get("proposed_thresholds"),
+        event_action="review",
+    )
+    append_event(
+        {
+            "type": AUTOTUNE_EVENT_REVIEWED,
+            "timestamp": datetime.now().isoformat(),
+            "payload": payload,
+        }
+    )
+    return {
+        "status": "reviewed",
+        "mode": mode,
+        "proposal_id": proposal.get("proposal_id"),
+        "fingerprint": proposal.get("fingerprint"),
+        "lifecycle": _autotune_lifecycle_state_snapshot(),
+    }
+
+
+@router.post("/guardian/autotune/lifecycle/apply")
+async def apply_guardian_autotune_lifecycle(request: GuardianAutoTuneLifecycleActionRequest):
+    mode = _ensure_autotune_mode("assist")
+    context = _resolve_autotune_proposal_or_raise(
+        proposal_id=request.proposal_id,
+        fingerprint=request.fingerprint,
+    )
+    proposal = context["proposal"]
+    actor = _normalize_autotune_actor(request.actor)
+    source = _normalize_autotune_source(request.source)
+
+    expected_before = _sanitize_guardian_thresholds_payload(proposal.get("current_thresholds"))
+    current_before = _current_guardian_thresholds()
+    if not _thresholds_match(current_before, expected_before):
+        raise HTTPException(
+            status_code=409,
+            detail="Guardian thresholds changed since proposal generation",
+        )
+
+    target_after = _sanitize_guardian_thresholds_payload(proposal.get("proposed_thresholds"))
+    applied_config = _persist_guardian_thresholds(target_after)
+    payload = _autotune_lifecycle_payload(
+        proposal=proposal,
+        actor=actor,
+        source=source,
+        reason=request.reason,
+        note=request.note,
+        before=current_before,
+        after=target_after,
+        event_action="apply",
+    )
+    payload["snapshot_id"] = f"ats_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    append_event(
+        {
+            "type": AUTOTUNE_EVENT_APPLIED,
+            "timestamp": datetime.now().isoformat(),
+            "payload": payload,
+        }
+    )
+    return {
+        "status": "applied",
+        "mode": mode,
+        "proposal_id": proposal.get("proposal_id"),
+        "fingerprint": proposal.get("fingerprint"),
+        "config": applied_config,
+        "lifecycle": _autotune_lifecycle_state_snapshot(),
+    }
+
+
+@router.post("/guardian/autotune/lifecycle/reject")
+async def reject_guardian_autotune_lifecycle(request: GuardianAutoTuneLifecycleActionRequest):
+    mode = _ensure_autotune_mode("assist")
+    context = _resolve_autotune_proposal_or_raise(
+        proposal_id=request.proposal_id,
+        fingerprint=request.fingerprint,
+    )
+    proposal = context["proposal"]
+    actor = _normalize_autotune_actor(request.actor)
+    source = _normalize_autotune_source(request.source)
+    current_thresholds = _current_guardian_thresholds()
+    payload = _autotune_lifecycle_payload(
+        proposal=proposal,
+        actor=actor,
+        source=source,
+        reason=request.reason,
+        note=request.note,
+        before=current_thresholds,
+        after=current_thresholds,
+        event_action="reject",
+    )
+    append_event(
+        {
+            "type": AUTOTUNE_EVENT_REJECTED,
+            "timestamp": datetime.now().isoformat(),
+            "payload": payload,
+        }
+    )
+    return {
+        "status": "rejected",
+        "mode": mode,
+        "proposal_id": proposal.get("proposal_id"),
+        "fingerprint": proposal.get("fingerprint"),
+        "lifecycle": _autotune_lifecycle_state_snapshot(),
+    }
+
+
+@router.post("/guardian/autotune/lifecycle/rollback")
+async def rollback_guardian_autotune_lifecycle(request: GuardianAutoTuneLifecycleActionRequest):
+    mode = _ensure_autotune_mode("assist")
+    latest_applied = _load_latest_event(AUTOTUNE_EVENT_APPLIED)
+    if not isinstance(latest_applied, dict):
+        raise HTTPException(
+            status_code=404,
+            detail="No autotune apply event available for rollback",
+        )
+    applied_payload = latest_applied.get("payload")
+    if not isinstance(applied_payload, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Latest autotune apply event payload is invalid",
+        )
+
+    applied_proposal_id = str(applied_payload.get("proposal_id") or "").strip()
+    applied_fingerprint = str(applied_payload.get("fingerprint") or "").strip()
+    requested_id = str(request.proposal_id or "").strip()
+    requested_fingerprint = str(request.fingerprint or "").strip()
+    if requested_id and applied_proposal_id and requested_id != applied_proposal_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Rollback target changed, refresh lifecycle before proceeding",
+        )
+    if (
+        requested_fingerprint
+        and applied_fingerprint
+        and requested_fingerprint != applied_fingerprint
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Rollback fingerprint changed, refresh lifecycle before proceeding",
+        )
+
+    actor = _normalize_autotune_actor(request.actor)
+    source = _normalize_autotune_source(request.source)
+    current_thresholds = _current_guardian_thresholds()
+    applied_after = _sanitize_guardian_thresholds_payload(applied_payload.get("after"))
+    if not _thresholds_match(current_thresholds, applied_after):
+        raise HTTPException(
+            status_code=409,
+            detail="Current thresholds do not match latest applied autotune state",
+        )
+    rollback_target = _sanitize_guardian_thresholds_payload(applied_payload.get("before"))
+    rolled_back_config = _persist_guardian_thresholds(rollback_target)
+    proposal = {
+        "proposal_id": applied_proposal_id
+        or _proposal_id_from_timestamp(latest_applied.get("timestamp")),
+        "fingerprint": applied_fingerprint or _build_autotune_proposal_fingerprint(applied_payload),
+        "trigger": applied_payload.get("trigger"),
+        "candidate_source": applied_payload.get("candidate_source"),
+        "confidence": applied_payload.get("confidence"),
+    }
+    payload = _autotune_lifecycle_payload(
+        proposal=proposal,
+        actor=actor,
+        source=source,
+        reason=request.reason or "manual_rollback",
+        note=request.note,
+        before=current_thresholds,
+        after=rollback_target,
+        event_action="rollback",
+    )
+    payload["snapshot_id"] = f"ats_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    payload["rollback_of"] = {
+        "event_type": AUTOTUNE_EVENT_APPLIED,
+        "timestamp": latest_applied.get("timestamp"),
+    }
+    append_event(
+        {
+            "type": AUTOTUNE_EVENT_ROLLED_BACK,
+            "timestamp": datetime.now().isoformat(),
+            "payload": payload,
+        }
+    )
+    return {
+        "status": "rolled_back",
+        "mode": mode,
+        "proposal_id": proposal.get("proposal_id"),
+        "fingerprint": proposal.get("fingerprint"),
+        "config": rolled_back_config,
+        "lifecycle": _autotune_lifecycle_state_snapshot(),
+    }
 
 
 @router.get("/anchor/current")
