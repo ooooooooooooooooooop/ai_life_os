@@ -1,4 +1,4 @@
-# unified-taskflow 治理规范 v1.1
+# unified-taskflow 治理规范 v3.0
 
 ## 一、目录隔离（强制）
 
@@ -9,6 +9,9 @@
 ├── index.json           # 任务索引
 ├── active/              # 当前活跃任务（仅限一个）
 │   └── [task-name]/
+│       ├── anchor.md        # 北极星文件（必须）
+│       ├── checkpoint.md    # 校验点记录（必须）
+│       └── design.md        # 技术设计（按需）
 └── archive/             # 归档任务
     └── [YYYY-MM-DD]_[task-name]_v[N]/
 ```
@@ -31,60 +34,43 @@ NEW → ACTIVE → COMPLETED / ABANDONED
 
 ---
 
-## 二、档位定义
+## 二、anchor.md 更新协议
 
-| 档位 | 门禁 | 角色 | 目录内容 |
-|------|------|------|----------|
-| Lite | 无 | 单角色 | `progress.md` |
-| Standard | 软 | 软分离 | `task_plan.md` + `progress.md` |
-| Spec-Driven | 硬 | Architect/Builder | 全链路文档 |
+anchor.md 是任务的唯一真相来源，修改需遵守：
+
+| 场景 | 动作 |
+|------|------|
+| Phase 0 完成时 | 首次创建，由用户确认内容 |
+| 用户修改需求时 | 更新对应字段，记录变更原因 |
+| Agent 发现歧义时 | 暂停执行，提议修改，用户确认后更新 |
+| 禁止 | Agent 单方面修改 anchor.md 而不告知用户 |
 
 ---
 
-## 三、档位切换
+## 三、Re-grounding 触发规则
 
-- **默认**：Standard
-- **升级**：AI 可建议，单向
-- **降级**：需用户确认风险
+| 触发条件 | 动作 |
+|----------|------|
+| 子任务完成 | 回读 anchor.md，写入对齐判定到 checkpoint.md |
+| 每 3-5 步操作 | 同上 |
+| 遇到不确定性 | 同上，若偏移则暂停请示用户 |
+| 用户补充新信息 | 先更新 anchor.md，再回读确认 |
 
 ---
 
 ## 四、门禁例外
 
-### Grounding Window
-- 最多 6 次只读
-- 结束输出 Summary
-
 ### Debug Window
-- 2-Action 放宽为 4-Action
-- 保留 3-Strike
+- 2-Action Rule 放宽为 4-Action
+- 保留 3-Strike Protocol
+- 连续失败时触发额外 Re-grounding
 
 ---
 
 ## 五、最小记录
 
-| 档位 | 要求 |
+| 文件 | 要求 |
 |------|------|
-| Lite | Trace Stub |
-| Standard | `task_plan.md` 完整 |
-| Spec-Driven | 全链路 |
-
----
-
-## 六、角色分离
-
-| 模式 | 规则 |
-|------|------|
-| Lite | 单角色，禁跨阶段推理 |
-| Standard | 软分离，显式标注 `[Planning]`/`[Executing]` |
-| Spec-Driven | 硬分离，切换需批准 |
-
----
-
-## 七、Traceability
-
-| 档位 | 要求 |
-|------|------|
-| Lite | 无 |
-| Standard | 推荐 |
-| Spec-Driven | 强制全链路 |
+| anchor.md | 必须，Phase 0 完成后创建 |
+| checkpoint.md | 必须，执行期间持续更新 |
+| design.md | 按需，复杂任务时生成 |

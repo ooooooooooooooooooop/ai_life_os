@@ -1,25 +1,10 @@
 # 技术设计
 
-## 元信息
-
-| 字段 | 值 |
-|------|------|
-| **需求来源** | [link to requirement.md] |
-| **版本** | v1.0 |
-| **作者** | [填写] |
-| **日期** | [填写] |
-
----
+> 按需生成 — 仅在复杂任务需要架构决策时创建
 
 ## Grounding Summary
 
-> 在设计前通过代码探查获得的上下文。
-
-### 目录结构
-
-```
-[paste relevant directory structure]
-```
+> 设计前通过代码探查获得的上下文。
 
 ### 关键文件
 
@@ -30,7 +15,6 @@
 ### 技术栈
 
 - [Language/Framework]
-- [Dependencies]
 
 ### 潜在影响点
 
@@ -38,42 +22,15 @@
 
 ---
 
-## 架构设计
+## 架构概述
 
-### 概述
-
-[整体架构描述]
-
-### 组件图
-
-```
-[ASCII diagram or description]
-```
-
-### 数据流
-
-```
-[Input] → [Process] → [Output]
-```
+[整体架构描述或 ASCII 图]
 
 ---
 
 ## 接口设计
 
-### API / 函数签名
-
-```python
-def example_function(param: Type) -> ReturnType:
-    """
-    Description.
-    
-    Args:
-        param: Parameter description.
-    
-    Returns:
-        Return value description.
-    """
-```
+[API / 函数签名 / 数据流]
 
 ---
 
@@ -82,18 +39,3 @@ def example_function(param: Type) -> ReturnType:
 | ID | 决策 | 理由 | 替代方案 |
 |----|------|------|----------|
 | D-001 | [选择] | [为什么] | [被拒绝的方案] |
-
----
-
-## 风险与缓解
-
-| 风险 | 影响 | 缓解措施 |
-|------|------|----------|
-| [描述] | 高/中/低 | [措施] |
-
----
-
-## 相关链接
-
-- [需求文档](requirement.md)
-- [任务清单](tasks.md)
