@@ -55,13 +55,13 @@ RULE_PATTERNS = {
 def classify_feedback(message: str) -> FeedbackResult:
     """
     将用户自由文本分类为结构化反馈意图。
-    
+
     实现策略:
     1. 规则匹配 (快速路径)
     2. LLM 分类 (复杂情况)
     """
     message_lower = message.lower().strip()
-    
+
     # 1. 规则匹配
     for intent, patterns in RULE_PATTERNS.items():
         for pattern in patterns:
@@ -71,7 +71,7 @@ def classify_feedback(message: str) -> FeedbackResult:
                     confidence=0.9,
                     extracted_reason=message
                 )
-    
+
     # 2. 检测进度百分比 (partial)
     import re
     progress_match = re.search(r'(\d{1,3})\s*[%％]', message)
@@ -84,7 +84,7 @@ def classify_feedback(message: str) -> FeedbackResult:
                 progress_percent=percent,
                 extracted_reason=message
             )
-    
+
     # 3. LLM 分类 (复杂情况)
     return _llm_classify(message)
 
@@ -92,7 +92,7 @@ def classify_feedback(message: str) -> FeedbackResult:
 def _llm_classify(message: str) -> FeedbackResult:
     """使用 LLM 进行复杂文本分类"""
     llm = get_llm("simple_local")
-    
+
     # 规则模式降级
     if llm.get_model_name() == "rule_based":
         return FeedbackResult(
@@ -100,7 +100,7 @@ def _llm_classify(message: str) -> FeedbackResult:
             confidence=0.0,
             extracted_reason=message
         )
-    
+
     system_prompt = """你是一个任务反馈分类器。根据用户的反馈文本，判断其意图。
 
 可能的意图:
@@ -120,7 +120,7 @@ def _llm_classify(message: str) -> FeedbackResult:
 }"""
 
     prompt = f"用户反馈: \"{message}\""
-    
+
     try:
         response = llm.generate(
             prompt=prompt,
@@ -128,7 +128,7 @@ def _llm_classify(message: str) -> FeedbackResult:
             temperature=0.1,
             max_tokens=200
         )
-        
+
         if response.success and response.content:
             result = parse_llm_json(response.content)
             if result:
@@ -137,7 +137,7 @@ def _llm_classify(message: str) -> FeedbackResult:
                     intent = FeedbackIntent(intent_str)
                 except ValueError:
                     intent = FeedbackIntent.UNKNOWN
-                
+
                 return FeedbackResult(
                     intent=intent,
                     confidence=result.get("confidence", 0.5),
@@ -147,7 +147,7 @@ def _llm_classify(message: str) -> FeedbackResult:
                 )
     except Exception as e:
         print(f"[FeedbackClassifier] LLM 分类失败: {e}")
-    
+
     return FeedbackResult(
         intent=FeedbackIntent.UNKNOWN,
         confidence=0.0,

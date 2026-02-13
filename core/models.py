@@ -63,6 +63,7 @@ class Task:
     created_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     skip_reason: str = ""
+    skip_context: Optional[str] = None
 
 @dataclass
 class Execution:

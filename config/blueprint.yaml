@@ -7,6 +7,68 @@
 # - intervention_level: OBSERVE_ONLY（只记录不展示）| SOFT（展示建议，默认）| ASK（展示并需用户确认）
 # - 本版不实现 IMMEDIATE（强制），留待 Safe Mode 之后
 intervention_level: SOFT
+guardian_thresholds:
+  deviation_signals:
+    repeated_skip: 2
+    l2_interruption: 1
+    stagnation_days: 3
+  l2_protection:
+    high: 0.75
+    medium: 0.50
+
+# Guardian authority policy
+guardian_authority:
+  escalation:
+    window_days: 7
+    firm_reminder_resistance: 2
+    periodic_check_resistance: 4
+  safe_mode:
+    enabled: true
+    resistance_threshold: 5
+    min_response_events: 3
+    max_confirmation_ratio: 0.34
+    recovery_confirmations: 2
+    cooldown_hours: 24
+  cadence:
+    reminder_budget_window_hours: 6
+    reminder_budget_max_prompts: 2
+    reminder_budget_enforce: true
+    support_recovery_cooldown_hours: 8
+    override_cooldown_hours: 3
+    observe_cooldown_hours: 12
+    trust_repair_window_hours: 48
+    trust_repair_negative_streak: 2
+    trust_repair_cooldown_hours: 12
+
+# Guardian boundary memory:
+# - reminder_frequency: low | balanced | high
+# - reminder_channel: in_app | digest | silent
+# - quiet_hours: optional low-disruption period; local timezone by default
+guardian_boundaries:
+  reminder_frequency: balanced
+  reminder_channel: in_app
+  quiet_hours:
+    enabled: true
+    start_hour: 22
+    end_hour: 8
+    timezone: local
+
+# Guardian auto-tuning:
+# - enabled: run proposal generation automatically during /sys/cycle.
+# - mode: "shadow" (proposal only) | "assist" (proposal + lifecycle APIs).
+# - llm_enabled: allow LLM proposal generation, still constrained by guardrails.
+guardian_autotune:
+  enabled: true
+  mode: shadow
+  llm_enabled: true
+  trigger:
+    lookback_days: 7
+    min_event_count: 20
+    cooldown_hours: 24
+  guardrails:
+    max_int_step: 1
+    max_float_step: 0.05
+    min_confidence: 0.55
 
 principles:
   - name: "life_value"

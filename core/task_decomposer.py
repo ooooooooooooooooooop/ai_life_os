@@ -13,33 +13,33 @@ logger = logging.getLogger("task_decomposer")
 
 class TaskDecomposer:
     """任务分解器"""
-    
+
     def __init__(self):
         # Use simple model for decomposition as it's more structured
-        self.llm = get_llm() 
-        
+        self.llm = get_llm()
+
     def decompose_goal(self, goal: Goal, start_date: date) -> List[Task]:
         """
         将目标分解为一系列任务。
         """
         logger.info(f"Decomposing goal: {goal.title}")
-        
+
         prompt = self._build_prompt(goal)
-        
+
         try:
             response = self.llm.generate(prompt)
             if not response.success:
                 logger.error(f"LLM decomposition failed: {response.error}")
                 return []
-                
+
             raw_tasks = self._parse_response(response.content)
-            
+
             tasks = []
             for i, item in enumerate(raw_tasks):
                 # Calculate simple schedule: 1 task per day for now
                 # Phase 2 TODO: Smarter scheduling logic
                 scheduled_date = start_date + timedelta(days=i)
-                
+
                 task = Task(
                     id=f"{goal.id}_t{i+1}",
                     goal_id=goal.id,
@@ -50,9 +50,9 @@ class TaskDecomposer:
                     scheduled_time=item.get("time_of_day", "Anytime") # e.g. "Morning", "14:00"
                 )
                 tasks.append(task)
-                
+
             return tasks
-            
+
         except Exception as e:
             logger.error(f"Task decomposition failed: {e}", exc_info=True)
             return []
@@ -61,18 +61,19 @@ class TaskDecomposer:
         return f"""
         You are an expert Project Manager.
         Decompose the following goal into a concrete, sequential learning path or action plan.
-        
+
         Goal: {goal.title}
         Description: {goal.description}
         Resources: {goal.resource_description}
         Target Level: {goal.target_level}
-        
+
         Requirements:
         1. Break it down into small, bite-sized tasks (30-60 mins each).
-        2. Tasks must be ACTIONABLE. Bad: "Learn variable". Good: "阅读第1章并编写 Hello World 脚本".
+        2. Tasks must be ACTIONABLE.
+           Bad: "Learn variable". Good: "阅读第1章并编写 Hello World 脚本".
         3. Initial plan should be about 5-7 tasks (for the first week).
         4. ALL Output must be in Simplified Chinese (简体中文).
-        
+
         Return ONLY a JSON array of objects.
         Example:
         [
@@ -94,5 +95,5 @@ class TaskDecomposer:
             cleaned = content.replace("```json", "").replace("```", "").strip()
             return json.loads(cleaned)
         except json.JSONDecodeError:
-            logger.warn(f"Failed to parse JSON task list: {content}")
+            logger.warning(f"Failed to parse JSON task list: {content}")
             return []

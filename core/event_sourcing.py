@@ -9,7 +9,8 @@ This module implements the core event sourcing logic:
 import json
 import logging
 from datetime import datetime, date
-from typing import Any, Dict, Optional, List
+from uuid import uuid4
+from typing import Any, Dict
 
 # Core Data Models
 from core.models import UserProfile, Goal, Task, Execution, GoalStatus, TaskStatus
@@ -20,6 +21,9 @@ EVENT_LOG_PATH = DATA_DIR / "event_log.jsonl"
 STATE_SNAPSHOT_PATH = DATA_DIR / "character_state.json"
 
 logger = logging.getLogger("event_sourcing")
+
+EVENT_SCHEMA_VERSION = "1.0"
+REQUIRED_EVENT_FIELDS = ("type", "timestamp", "schema_version", "event_id")
 
 # --- Initial State Structure ---
 
@@ -34,6 +38,16 @@ def get_initial_state() -> Dict[str, Any]:
         "rhythm": {},
         "ongoing": {"active_tasks": []},
         "time_state": {"current_date": "", "previous_date": ""},
+        "guardian": {
+            "last_intervention_confirmation": None,
+            "last_intervention_response": None,
+            "safe_mode": {
+                "active": False,
+                "entered_at": None,
+                "exited_at": None,
+                "reason": None,
+            },
+        },
         "goals": [], # List[Goal]
         "tasks": [], # List[Task]
         "executions": [], # List[Execution]
@@ -52,9 +66,9 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
     event_type = event.get("type")
     payload = event.get("payload", {})
     timestamp = event.get("timestamp")
-    
+
     # --- Profile Events ---
-    
+
     if event_type == "profile_updated":
         # payload: { "field": "occupation", "value": "coder" }
         field_name = payload.get("field")
@@ -64,15 +78,15 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
         if field_name:
             state.setdefault("identity", {})
             state["identity"][field_name] = value
-            
+
     elif event_type == "onboarding_completed":
         state["profile"].onboarding_completed = True
-        
+
     elif event_type == "preferences_updated":
         state["profile"].preferences.update(payload.get("preferences", {}))
-        
+
     # --- Goal Events ---
-    
+
     elif event_type == "goal_created":
         # payload: { "goal": {...} }
         goal_data = payload.get("goal")
@@ -88,7 +102,7 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
                 except ValueError:
                     pass
             state["goals"].append(goal)
-            
+
     elif event_type == "goal_updated":
         # payload: { "id": "...", "updates": {...} }
         goal_id = payload.get("id")
@@ -107,7 +121,7 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
                                 pass
                         setattr(goal, k, v)
                 break
-                
+
     elif event_type == "goal_confirmed":
         # payload: { "id": "..." }
         goal_id = payload.get("id")
@@ -118,7 +132,7 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
                 break
 
     # --- Task Events ---
-    
+
     elif event_type == "task_created":
         # payload: { "task": {...} }
         task_data = payload.get("task")
@@ -133,7 +147,7 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
                 except ValueError:
                     pass
             state["tasks"].append(task)
-            
+
     elif event_type == "task_updated":
         task_id = payload.get("id")
         updates = payload.get("updates", {})
@@ -143,18 +157,23 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
                     if hasattr(task, k):
                         if k == "status" and isinstance(v, str):
                             v = TaskStatus(v)
+                        if k == "scheduled_date" and isinstance(v, str):
+                            try:
+                                v = date.fromisoformat(v)
+                            except ValueError:
+                                pass
                         setattr(task, k, v)
                 break
-                
+
     # --- Execution Events ---
-    
+
     elif event_type == "execution_started":
         # payload: { "execution": {...} }
         exec_data = payload.get("execution")
         if exec_data:
             execution = Execution(**exec_data)
             state["executions"].append(execution)
-            
+
     elif event_type == "execution_completed":
         exec_id = payload.get("id")
         outcome = payload.get("outcome")
@@ -171,6 +190,57 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
             "previous_date": event.get("previous_date", ""),
         }
 
+    elif event_type == "guardian_intervention_confirmed":
+        state.setdefault("guardian", {})
+        response_payload = payload if isinstance(payload, dict) else {}
+        state["guardian"]["last_intervention_confirmation"] = {
+            "timestamp": timestamp,
+            "payload": response_payload,
+        }
+        state["guardian"]["last_intervention_response"] = {
+            "timestamp": timestamp,
+            "action": "confirm",
+            "context": response_payload.get("context"),
+            "payload": response_payload,
+        }
+
+    elif event_type == "guardian_intervention_responded":
+        state.setdefault("guardian", {})
+        response_payload = payload if isinstance(payload, dict) else {}
+        state["guardian"]["last_intervention_response"] = {
+            "timestamp": timestamp,
+            "action": response_payload.get("action"),
+            "context": response_payload.get("context"),
+            "payload": response_payload,
+        }
+
+    elif event_type == "guardian_safe_mode_entered":
+        state.setdefault("guardian", {})
+        response_payload = payload if isinstance(payload, dict) else {}
+        state.setdefault("guardian", {})
+        state["guardian"]["safe_mode"] = {
+            "active": True,
+            "entered_at": timestamp,
+            "exited_at": None,
+            "reason": response_payload.get("reason"),
+        }
+
+    elif event_type == "guardian_safe_mode_exited":
+        state.setdefault("guardian", {})
+        response_payload = payload if isinstance(payload, dict) else {}
+        safe_mode = state["guardian"].get("safe_mode")
+        if not isinstance(safe_mode, dict):
+            safe_mode = {
+                "active": False,
+                "entered_at": None,
+                "exited_at": None,
+                "reason": None,
+            }
+        safe_mode["active"] = False
+        safe_mode["exited_at"] = timestamp
+        safe_mode["reason"] = response_payload.get("reason")
+        state["guardian"]["safe_mode"] = safe_mode
+
     return state
 
 # --- Core Functions ---
@@ -180,10 +250,10 @@ def rebuild_state() -> Dict[str, Any]:
     Rebuild state from event log.
     """
     state = get_initial_state()
-    
+
     if not EVENT_LOG_PATH.exists():
         return state
-    
+
     with open(EVENT_LOG_PATH, "r", encoding="utf-8") as f:
         for line in f:
             if not line.strip():
@@ -194,26 +264,51 @@ def rebuild_state() -> Dict[str, Any]:
             except Exception as e:
                 logger.error(f"Failed to process event: {line[:100]}... Error: {e}")
                 continue
-                
+
     return state
+
+def validate_event_shape(event: Dict[str, Any], strict: bool = False) -> Dict[str, Any]:
+    """
+    Validate event shape and return validation details.
+
+    Args:
+        event: Event dictionary
+        strict: If True, all required fields are mandatory.
+            If False, only `type` and `timestamp` are mandatory (legacy-compatible).
+    """
+    missing = []
+    required = REQUIRED_EVENT_FIELDS if strict else ("type", "timestamp")
+    for field in required:
+        if not event.get(field):
+            missing.append(field)
+    return {"valid": not missing, "missing": missing}
+
+
+def normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize an event to the canonical shape.
+    """
+    normalized = dict(event)
+    normalized.setdefault("timestamp", datetime.now().isoformat())
+    normalized.setdefault("schema_version", EVENT_SCHEMA_VERSION)
+    normalized.setdefault("event_id", f"evt_{uuid4().hex[:12]}")
+    return normalized
+
 
 def append_event(event: Dict[str, Any]) -> None:
     """
     Append an event to the event log.
     After append: time_tick -> create_snapshot(force=True); else -> create_snapshot() if interval.
     """
-    if "timestamp" not in event:
-        event["timestamp"] = datetime.now().isoformat()
-    
+    normalized_event = normalize_event(event)
+
     EVENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    
+
     with open(EVENT_LOG_PATH, "a", encoding="utf-8") as f:
-        f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
-    
+        f.write(json.dumps(normalized_event, ensure_ascii=False, default=str) + "\n")
+
     from core.snapshot_manager import create_snapshot, should_create_snapshot
-    if event.get("type") == "time_tick":
+    if normalized_event.get("type") == "time_tick":
         create_snapshot(force=True)
     elif should_create_snapshot():
         create_snapshot()
-
-

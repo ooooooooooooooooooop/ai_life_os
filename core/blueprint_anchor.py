@@ -221,7 +221,10 @@ class AnchorManager:
             added_non_negotiables=set(new.non_negotiables) - set(old.non_negotiables),
             removed_non_negotiables=set(old.non_negotiables) - set(new.non_negotiables),
             added_commitments=set(new.long_horizon_commitments) - set(old.long_horizon_commitments),
-            removed_commitments=set(old.long_horizon_commitments) - set(new.long_horizon_commitments),
+            removed_commitments=(
+                set(old.long_horizon_commitments)
+                - set(new.long_horizon_commitments)
+            ),
             added_anti_values=set(new.anti_values) - set(old.anti_values),
             removed_anti_values=set(old.anti_values) - set(new.anti_values),
             added_adversaries=set(new.instinct_adversaries) - set(old.instinct_adversaries),

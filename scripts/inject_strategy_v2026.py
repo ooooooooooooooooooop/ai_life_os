@@ -6,10 +6,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.event_sourcing import append_event
-from core.objective_engine.models import GoalLayer, GoalSource, GoalState, ObjectiveNode
-from core.objective_engine.registry import GoalRegistry
-from core.paths import DATA_DIR
+from core.event_sourcing import append_event  # noqa: E402
+from core.objective_engine.models import GoalLayer, GoalSource, GoalState, ObjectiveNode  # noqa: E402
+from core.objective_engine.registry import GoalRegistry  # noqa: E402
+from core.paths import DATA_DIR  # noqa: E402
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -66,7 +66,10 @@ def inject_strategy():
     vision = ObjectiveNode(
         id="vis_2026_freedom",
         title="2028 Tech Nomad Strategy",
-        description="Annual income 800k+ (remote/USD), 500k cash buffer, reproducible monetization system.",
+        description=(
+            "Annual income 800k+ (remote/USD), 500k cash buffer, "
+            "reproducible monetization system."
+        ),
         layer=GoalLayer.VISION,
         state=GoalState.ACTIVE,
         source=GoalSource.USER_INPUT,
@@ -104,7 +107,10 @@ def inject_strategy():
         sub_tasks=[
             {
                 "id": "t_setup_folders",
-                "description": "Create folders: 2026_Income_Leap/{Profile,Portfolio,Applications,Learning}",
+                "description": (
+                    "Create folders: "
+                    "2026_Income_Leap/{Profile,Portfolio,Applications,Learning}"
+                ),
                 "estimated_time": 15,
                 "difficulty": 1,
             },

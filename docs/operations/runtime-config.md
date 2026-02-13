@@ -80,3 +80,168 @@ Migrate existing data:
 ```bash
 python tools/migrate_data_dir.py --dest D:\ai-life-os-data
 ```
+
+## Event Log Schema Utilities
+
+- Validate replay integrity:
+
+```bash
+python tools/validate_event_replay.py
+python tools/validate_event_replay.py --strict
+```
+
+- Migrate event log to canonical schema fields (`schema_version`, `event_id`):
+
+```bash
+python tools/migrate_event_log_schema.py
+python tools/migrate_event_log_schema.py --apply
+```
+
+## Guardian Autotune Operation
+
+### Guardian Boundary Memory
+
+Use boundary memory to express low-disruption preferences:
+
+- `GET /api/v1/guardian/boundaries/config`
+- `PUT /api/v1/guardian/boundaries/config`
+
+Main fields:
+
+- `reminder_frequency` (`low | balanced | high`)
+- `reminder_channel` (`in_app | digest | silent`)
+- `quiet_hours.enabled`
+- `quiet_hours.start_hour` (`0-23`)
+- `quiet_hours.end_hour` (`0-23`)
+- `quiet_hours.timezone` (default `local`)
+
+### Guardian Trust-Repair Cadence
+
+Under `guardian_authority.cadence` in `config/blueprint.yaml`:
+
+- `reminder_budget_window_hours`
+- `reminder_budget_max_prompts`
+- `reminder_budget_enforce`
+- `support_recovery_cooldown_hours`
+- `override_cooldown_hours`
+- `observe_cooldown_hours`
+- `trust_repair_window_hours`
+- `trust_repair_negative_streak`
+- `trust_repair_cooldown_hours`
+
+When `trust_repair_negative_streak` is reached within `trust_repair_window_hours`,
+Guardian policy shifts to low-pressure `trust_repair` mode.
+
+### Trust-Repair Dispatch Contract
+
+`GET /api/v1/tasks/current` now returns low-pressure dispatch context when trust-repair is active:
+
+- `dispatch_policy.mode`
+- `dispatch_policy.low_pressure`
+- `dispatch_policy.prioritize_recovery`
+- `dispatch_policy.repair_min_step`
+
+In low-pressure mode, overdue reschedule only targets `_recovery` tasks.
+
+### Iteration 8 Trust Calibration Metrics
+
+`/api/v1/retrospective` exposes:
+
+- `humanization_metrics.trust_calibration.perceived_control_score`
+- `humanization_metrics.trust_calibration.interruption_burden_rate`
+- `humanization_metrics.trust_calibration.recovery_time_to_resume_minutes`
+- `humanization_metrics.trust_calibration.mundane_time_saved_hours`
+
+`/api/v1/state` mirrors these under:
+
+- `guardian.metrics.perceived_control_score`
+- `guardian.metrics.interruption_burden_rate`
+- `guardian.metrics.recovery_time_to_resume_minutes`
+- `guardian.metrics.mundane_time_saved_hours`
+
+All four fields include explicit `status/reason` in no-data scenarios.
+
+### Modes
+
+- `shadow`  
+  Generate proposals only, no lifecycle apply actions.
+
+- `assist`  
+  Keep proposal generation and enable lifecycle governance APIs
+  (`review/apply/reject/rollback`) with manual operator control.
+
+### Config API
+
+- `GET /api/v1/guardian/autotune/config`
+- `PUT /api/v1/guardian/autotune/config`
+
+Main fields:
+
+- `enabled`
+- `mode` (`shadow | assist`)
+- `llm_enabled`
+- `trigger.lookback_days`
+- `trigger.min_event_count`
+- `trigger.cooldown_hours`
+- `guardrails.max_int_step`
+- `guardrails.max_float_step`
+- `guardrails.min_confidence`
+- `auto_evaluate.enabled`
+- `auto_evaluate.horizon_hours`
+- `auto_evaluate.lookback_days`
+- `auto_evaluate.max_targets_per_cycle`
+
+### Lifecycle API
+
+- `GET /api/v1/guardian/autotune/lifecycle/latest`
+- `GET /api/v1/guardian/autotune/lifecycle/history?days=14&limit=20`
+- `GET /api/v1/guardian/autotune/evaluation/logs?days=14&limit=20`
+- `POST /api/v1/guardian/autotune/lifecycle/review`
+- `POST /api/v1/guardian/autotune/lifecycle/apply`
+- `POST /api/v1/guardian/autotune/lifecycle/reject`
+- `POST /api/v1/guardian/autotune/lifecycle/evaluate`
+- `POST /api/v1/guardian/autotune/lifecycle/rollback`
+
+Lifecycle request body supports:
+
+- `proposal_id`
+- `fingerprint`
+- `actor`
+- `source`
+- `reason`
+- `note`
+- `force` (optional, default `false`; allows early/manual re-evaluation)
+
+`lifecycle/history` returns:
+
+- proposal lifecycle history chain (`proposed/reviewed/applied/rejected/evaluated/rolled_back`)
+- operational metrics:
+  - `autotune_review_turnaround_hours`
+  - `autotune_apply_success_rate` (48h window)
+  - `autotune_rollback_rate`
+  - `post_apply_trust_delta_48h` (nullable with status/reason)
+
+`evaluation/logs` returns cycle auto-evaluation run summaries:
+
+- `status`, `mode`, `reason`
+- `evaluated_count`, `target_count`, `error_count`
+- `targets`, `errors`, `config`
+- each `errors` item includes `proposal_id`, `fingerprint`, `status_code`, `detail`
+
+### Operational Notes
+
+- Lifecycle actions require `mode=assist`; otherwise API returns `409`.
+- Apply records before/after threshold snapshots and supports one-step rollback.
+- Apply events now record `trust_index_before` for post-apply trust tracking.
+- `evaluate` action settles 48h outcome (`trust_index_after_48h`, trust delta, apply outcome status).
+- `POST /api/v1/sys/cycle` now runs auto-evaluate for overdue apply records and returns
+  `guardian_autotune_evaluation` payload (status, evaluated_count, targets, errors).
+- Auto-evaluate scan/window/throughput are driven by `guardian_autotune.auto_evaluate` config.
+- Each cycle auto-evaluation run is appended to event log and can be queried via
+  `GET /api/v1/guardian/autotune/evaluation/logs`.
+- Failed log items can be retried by calling
+  `POST /api/v1/guardian/autotune/lifecycle/evaluate` with `force=true`.
+- Lifecycle snapshot includes `rollback_recommendation` based on:
+  - guardian safe mode active
+  - low trust index
+  - negative weekly alignment delta

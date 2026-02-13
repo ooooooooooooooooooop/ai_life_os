@@ -54,6 +54,12 @@ class ObjectiveNode:
     urgency_score: float = 0.0
     feasibility_score: float = 1.0
     estimated_hours: Optional[float] = None
+    anchor_version: Optional[str] = None
+    alignment_score: Optional[float] = None
+    alignment_level: Optional[str] = None
+    alignment_reasons: List[str] = field(default_factory=list)
+    matched_commitments: List[str] = field(default_factory=list)
+    matched_anti_values: List[str] = field(default_factory=list)
 
     def __post_init__(self):
         from datetime import datetime

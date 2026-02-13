@@ -34,6 +34,12 @@ def _node_to_dict(n: ObjectiveNode) -> dict:
         "urgency_score": n.urgency_score,
         "feasibility_score": n.feasibility_score,
         "estimated_hours": n.estimated_hours,
+        "anchor_version": n.anchor_version,
+        "alignment_score": n.alignment_score,
+        "alignment_level": n.alignment_level,
+        "alignment_reasons": n.alignment_reasons,
+        "matched_commitments": n.matched_commitments,
+        "matched_anti_values": n.matched_anti_values,
     }
     return d
 
@@ -60,6 +66,12 @@ def _dict_to_node(d: dict) -> ObjectiveNode:
         urgency_score=d.get("urgency_score", 0.0),
         feasibility_score=d.get("feasibility_score", 1.0),
         estimated_hours=d.get("estimated_hours"),
+        anchor_version=d.get("anchor_version"),
+        alignment_score=d.get("alignment_score"),
+        alignment_level=d.get("alignment_level"),
+        alignment_reasons=d.get("alignment_reasons", []),
+        matched_commitments=d.get("matched_commitments", []),
+        matched_anti_values=d.get("matched_anti_values", []),
     )
 
 

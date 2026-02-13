@@ -1,26 +1,96 @@
-import { useState, useEffect } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+
 import { api } from '../utils/api';
 
-// 从 /state 的 visions/objectives/goals 构建与 /goals/tree 兼容的树形结构
 function buildTreeFromState(visions = [], objectives = [], goals = []) {
-    const layerToHorizon = (layer) => (layer === 'vision' ? 'vision' : layer === 'objective' ? 'milestone' : 'goal');
-    const node = (n) => ({ ...n, horizon: layerToHorizon(n.layer), children: [] });
+    const node = (n) => ({ ...n, children: [] });
     const byParent = (list, parentId) => list.filter((x) => (x.parent_id || null) === parentId);
 
     const trees = [];
-    for (const v of visions) {
-        const vn = node(v);
-        const objs = byParent(objectives, v.id);
-        for (const o of objs) {
-            const on = node(o);
-            on.children = byParent(goals, o.id).map((g) => node(g));
-            vn.children.push(on);
+    for (const vision of visions) {
+        const visionNode = node(vision);
+        const objectiveNodes = byParent(objectives, vision.id);
+        for (const objective of objectiveNodes) {
+            const objectiveNode = node(objective);
+            objectiveNode.children = byParent(goals, objective.id).map((goal) => node(goal));
+            visionNode.children.push(objectiveNode);
         }
-        vn.children.push(...byParent(goals, v.id).map((g) => node(g)));
-        trees.push(vn);
+        visionNode.children.push(...byParent(goals, vision.id).map((goal) => node(goal)));
+        trees.push(visionNode);
     }
     return trees;
+}
+
+function OverlayModal({ open, title, children, onCancel, onConfirm, confirmText, disabled }) {
+    if (!open) return null;
+    return (
+        <div
+            style={{
+                position: 'fixed',
+                inset: 0,
+                background: 'rgba(0, 0, 0, 0.55)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                zIndex: 1000,
+                padding: '1rem'
+            }}
+            onClick={onCancel}
+        >
+            <div
+                className="glass-card"
+                style={{ width: '100%', maxWidth: '520px', padding: '1rem' }}
+                onClick={(e) => e.stopPropagation()}
+            >
+                <h4 style={{ marginTop: 0, marginBottom: '0.75rem' }}>{title}</h4>
+                {children}
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '1rem' }}>
+                    <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={disabled}>
+                        取消
+                    </button>
+                    <button type="button" className="btn btn-primary" onClick={onConfirm} disabled={disabled}>
+                        {confirmText}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function extractApiErrorDetail(error) {
+    if (typeof error?.response?.data?.detail === 'string' && error.response.data.detail.trim()) {
+        return error.response.data.detail.trim();
+    }
+    if (typeof error?.message === 'string' && error.message.trim()) {
+        return error.message.trim();
+    }
+    return 'unknown_error';
+}
+
+async function copyTextToClipboard(text) {
+    if (typeof navigator !== 'undefined' && navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+    }
+    if (typeof document === 'undefined') {
+        throw new Error('clipboard_unavailable');
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    textarea.style.pointerEvents = 'none';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+
+    const copied = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    if (!copied) {
+        throw new Error('clipboard_unavailable');
+    }
 }
 
 export default function Home() {
@@ -32,13 +102,172 @@ export default function Home() {
     const [loading, setLoading] = useState(true);
     const [actionLoading, setActionLoading] = useState(false);
     const [error, setError] = useState(null);
-    const [viewMode, setViewMode] = useState('execute'); // 'plan' | 'execute'
+    const [viewMode, setViewMode] = useState('execute');
     const [retrospective, setRetrospective] = useState(null);
     const [weeklyReviewDue, setWeeklyReviewDue] = useState(false);
+    const [anchorSnapshot, setAnchorSnapshot] = useState(null);
+    const [alignmentOverview, setAlignmentOverview] = useState(null);
+    const [weeklyAlignmentTrend, setWeeklyAlignmentTrend] = useState(null);
+    const [anchorEffect, setAnchorEffect] = useState(null);
+
+    const [skipDialogOpen, setSkipDialogOpen] = useState(false);
+    const [skipReason, setSkipReason] = useState('');
+    const [skipContext, setSkipContext] = useState('recovering');
+    const [deleteTargetGoalId, setDeleteTargetGoalId] = useState(null);
+    const [guardianResponseLoading, setGuardianResponseLoading] = useState(false);
+    const [guardianResponseContext, setGuardianResponseContext] = useState('recovering');
+    const [anchorDiff, setAnchorDiff] = useState(null);
+    const [anchorDiffLoading, setAnchorDiffLoading] = useState(false);
+    const [activateAnchorLoading, setActivateAnchorLoading] = useState(false);
+    const [activateAnchorModalOpen, setActivateAnchorModalOpen] = useState(false);
+    const [guardianConfig, setGuardianConfig] = useState(null);
+    const [guardianConfigLoading, setGuardianConfigLoading] = useState(false);
+    const [guardianConfigSaving, setGuardianConfigSaving] = useState(false);
+    const [guardianConfigDirty, setGuardianConfigDirty] = useState(false);
+    const [guardianConfigSavedAt, setGuardianConfigSavedAt] = useState(null);
+    const [guardianBoundariesConfig, setGuardianBoundariesConfig] = useState(null);
+    const [guardianBoundariesLoading, setGuardianBoundariesLoading] = useState(false);
+    const [guardianBoundariesSaving, setGuardianBoundariesSaving] = useState(false);
+    const [guardianBoundariesDirty, setGuardianBoundariesDirty] = useState(false);
+    const [guardianBoundariesSavedAt, setGuardianBoundariesSavedAt] = useState(null);
+    const [guardianAutotuneConfig, setGuardianAutotuneConfig] = useState(null);
+    const [guardianAutotuneLifecycle, setGuardianAutotuneLifecycle] = useState(null);
+    const [guardianAutotuneHistory, setGuardianAutotuneHistory] = useState([]);
+    const [guardianAutotuneMetrics, setGuardianAutotuneMetrics] = useState(null);
+    const [guardianAutotuneEvalLogs, setGuardianAutotuneEvalLogs] = useState([]);
+    const [guardianAutotuneLoading, setGuardianAutotuneLoading] = useState(false);
+    const [guardianAutotuneSaving, setGuardianAutotuneSaving] = useState(false);
+    const [guardianAutotuneDirty, setGuardianAutotuneDirty] = useState(false);
+    const [guardianAutotuneSavedAt, setGuardianAutotuneSavedAt] = useState(null);
+    const [guardianAutotuneActionLoading, setGuardianAutotuneActionLoading] = useState(false);
+    const [guardianAutotuneRetryLogKey, setGuardianAutotuneRetryLogKey] = useState(null);
+    const [guardianAutotuneExpandedLogMap, setGuardianAutotuneExpandedLogMap] = useState({});
+    const [guardianAutotuneRetryResult, setGuardianAutotuneRetryResult] = useState(null);
+    const [guardianAutotuneRetryCopiedKey, setGuardianAutotuneRetryCopiedKey] = useState(null);
+    const [l2SessionActionLoading, setL2SessionActionLoading] = useState(false);
+    const [l2InterruptReason, setL2InterruptReason] = useState('context_switch');
+    const [l2StartIntention, setL2StartIntention] = useState('');
+    const [l2ResumeStep, setL2ResumeStep] = useState('');
+    const [l2CompletionReflection, setL2CompletionReflection] = useState('');
+    const [recoveryBatchLoading, setRecoveryBatchLoading] = useState(false);
+
+    const signalNameMap = {
+        repeated_skip: '重复跳过',
+        l2_interruption: '深度时段中断',
+        stagnation: '推进停滞'
+    };
+    const escalationStageMap = {
+        gentle_nudge: '温和提醒',
+        firm_reminder: '坚定提醒',
+        periodic_check: '周期检查'
+    };
+    const responseContextLabelMap = {
+        recovering: '恢复精力',
+        resource_blocked: '资源受阻',
+        task_too_big: '任务过大',
+        instinct_escape: '本能逃避'
+    };
+    const responseContextHintMap = {
+        recovering: '先恢复状态，再继续推进。',
+        resource_blocked: '当前被资源或外部条件卡住。',
+        task_too_big: '先拆成最小下一步，降低启动阻力。',
+        instinct_escape: '正在被即时满足牵引，偏离长期价值。'
+    };
+    const l2InterruptReasonLabelMap = {
+        context_switch: '上下文切换',
+        external_interrupt: '外部打断',
+        energy_drop: '精力下滑',
+        tooling_blocked: '工具阻塞',
+        other: '其他'
+    };
+    const supportModeLabelMap = {
+        support_heavy: '支持优先',
+        balanced: '支持/覆盖平衡',
+        override_heavy: '覆盖优先',
+        insufficient_data: '数据不足'
+    };
+    const boundaryFrequencyLabelMap = {
+        low: '低频',
+        balanced: '平衡',
+        high: '高频'
+    };
+    const boundaryChannelLabelMap = {
+        in_app: '应用内',
+        digest: '摘要',
+        silent: '静默'
+    };
+    const autotuneStatusLabelMap = {
+        proposed: '已提议',
+        reviewed: '已审阅',
+        applied: '已应用',
+        rejected: '已拒绝',
+        rolled_back: '已回滚'
+    };
+    const responseContextOptions = [
+        { value: 'recovering', label: '恢复精力' },
+        { value: 'resource_blocked', label: '资源受阻' },
+        { value: 'task_too_big', label: '任务过大' },
+        { value: 'instinct_escape', label: '本能逃避' }
+    ];
+
+    const severityStyleMap = {
+        high: { background: 'rgba(239, 68, 68, 0.2)', color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.4)' },
+        medium: { background: 'rgba(245, 158, 11, 0.2)', color: '#fcd34d', border: '1px solid rgba(245, 158, 11, 0.35)' },
+        info: { background: 'rgba(59, 130, 246, 0.2)', color: '#93c5fd', border: '1px solid rgba(59, 130, 246, 0.35)' }
+    };
+    const alignmentLevelStyleMap = {
+        high: { color: '#86efac', border: '1px solid rgba(34, 197, 94, 0.4)', background: 'rgba(34, 197, 94, 0.15)' },
+        medium: { color: '#fcd34d', border: '1px solid rgba(245, 158, 11, 0.4)', background: 'rgba(245, 158, 11, 0.15)' },
+        low: { color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.4)', background: 'rgba(239, 68, 68, 0.15)' },
+        unknown: { color: '#cbd5e1', border: '1px solid rgba(148, 163, 184, 0.35)', background: 'rgba(148, 163, 184, 0.12)' }
+    };
+
+    const formatAlignmentLevel = (level) => {
+        if (level === 'high') return '高对齐';
+        if (level === 'medium') return '中对齐';
+        if (level === 'low') return '低对齐';
+        return '待评估';
+    };
 
     useEffect(() => {
         fetchAll();
     }, []);
+
+    useEffect(() => {
+        const latestContext = retrospective?.response_action?.latest?.context;
+        if (latestContext) {
+            setGuardianResponseContext(latestContext);
+            return;
+        }
+        const defaultContext = retrospective?.response_action?.default_context;
+        if (defaultContext) {
+            setGuardianResponseContext(defaultContext);
+        }
+    }, [retrospective?.response_action?.fingerprint]);
+
+    useEffect(() => {
+        const options = retrospective?.l2_session_action?.interrupt?.reason_options || [];
+        if (!Array.isArray(options) || options.length === 0) return;
+        const allowed = new Set(options.map((opt) => opt?.value).filter(Boolean));
+        if (!allowed.has(l2InterruptReason)) {
+            setL2InterruptReason(options[0]?.value || 'context_switch');
+        }
+    }, [retrospective?.l2_session_action?.active_session_id]);
+
+    useEffect(() => {
+        const minimalStep = retrospective?.l2_session_action?.resume?.minimal_step
+            || retrospective?.l2_session?.resume_hint
+            || '';
+        if (minimalStep) {
+            setL2ResumeStep(minimalStep);
+        } else if (!retrospective?.l2_session?.resume_ready) {
+            setL2ResumeStep('');
+        }
+    }, [
+        retrospective?.l2_session_action?.resume?.session_id,
+        retrospective?.l2_session?.resume_ready,
+        retrospective?.l2_session?.resume_hint
+    ]);
 
     const fetchAll = async () => {
         try {
@@ -49,6 +278,11 @@ export default function Home() {
             if (stateRes?.data) {
                 const s = stateRes.data;
                 setWeeklyReviewDue(Boolean(s.weekly_review_due));
+                setAnchorSnapshot(s.anchor || null);
+                setAlignmentOverview(s.alignment?.goal_summary || null);
+                setWeeklyAlignmentTrend(s.alignment?.weekly_trend || null);
+                setGuardianBoundariesConfig(s.guardian?.boundaries || null);
+                setGuardianBoundariesDirty(false);
                 if (s.identity) {
                     setProfile({
                         occupation: s.identity.occupation ?? '',
@@ -57,34 +291,91 @@ export default function Home() {
                         ...s.identity
                     });
                 }
-                const allGoals = (s.goals || []).map((g) => ({
-                    ...g,
-                    horizon: g.layer === 'vision' ? 'vision' : g.layer === 'objective' ? 'milestone' : 'goal'
-                }));
+                const allGoals = s.goals || [];
                 setGoals({
                     active: allGoals.filter((g) => g.state === 'active'),
                     completed: allGoals.filter((g) => g.state === 'completed')
                 });
                 setGoalTree(buildTreeFromState(s.visions || [], s.objectives || [], allGoals));
             } else {
+                setAnchorSnapshot(null);
+                setAlignmentOverview(null);
+                setWeeklyAlignmentTrend(null);
+                setAnchorEffect(null);
+                setGuardianConfig(null);
+                setGuardianBoundariesConfig(null);
+                setGuardianAutotuneConfig(null);
+                setGuardianAutotuneLifecycle(null);
+                setGuardianAutotuneHistory([]);
+                setGuardianAutotuneMetrics(null);
+                setGuardianAutotuneEvalLogs([]);
                 const [profileRes, goalsRes, treeRes] = await Promise.allSettled([
                     api.get('/onboarding/status'),
-                    api.get('/goals/list'),
+                    api.get('/goals'),
                     api.get('/goals/tree')
                 ]);
                 if (profileRes.status === 'fulfilled') setProfile(profileRes.value.data.profile);
-                if (goalsRes.status === 'fulfilled') setGoals(goalsRes.value.data);
+                if (goalsRes.status === 'fulfilled') {
+                    const nodes = goalsRes.value.data.goals || [];
+                    setGoals({
+                        active: nodes.filter((g) => g.state === 'active'),
+                        completed: nodes.filter((g) => g.state === 'completed')
+                    });
+                }
                 if (treeRes.status === 'fulfilled') setGoalTree(treeRes.value.data.tree || []);
             }
 
-            const [tasksRes, currentRes, retroRes] = await Promise.allSettled([
+            const [
+                tasksRes,
+                currentRes,
+                retroRes,
+                effectRes,
+                guardianConfigRes,
+                guardianBoundariesRes,
+                autotuneLifecycleRes,
+                autotuneHistoryRes,
+                autotuneEvalLogsRes
+            ] = await Promise.allSettled([
                 api.get('/tasks/list'),
                 api.get('/tasks/current'),
-                api.get('/retrospective', { params: { days: 7 } })
+                api.get('/retrospective', { params: { days: 7 } }),
+                api.get('/anchor/effect'),
+                api.get('/guardian/config'),
+                api.get('/guardian/boundaries/config'),
+                api.get('/guardian/autotune/lifecycle/latest'),
+                api.get('/guardian/autotune/lifecycle/history', { params: { days: 14, limit: 12 } }),
+                api.get('/guardian/autotune/evaluation/logs', { params: { days: 14, limit: 8 } })
             ]);
             if (tasksRes.status === 'fulfilled') setTasks(tasksRes.value.data);
             if (currentRes.status === 'fulfilled') setCurrentTask(currentRes.value.data.task);
             if (retroRes.status === 'fulfilled') setRetrospective(retroRes.value.data);
+            if (effectRes.status === 'fulfilled') setAnchorEffect(effectRes.value.data);
+            if (guardianConfigRes.status === 'fulfilled') {
+                setGuardianConfig(guardianConfigRes.value.data?.config || null);
+                setGuardianConfigDirty(false);
+            }
+            if (guardianBoundariesRes.status === 'fulfilled') {
+                setGuardianBoundariesConfig(guardianBoundariesRes.value.data?.config || null);
+                setGuardianBoundariesDirty(false);
+            }
+            if (autotuneLifecycleRes.status === 'fulfilled') {
+                const payload = autotuneLifecycleRes.value.data || {};
+                setGuardianAutotuneConfig(payload.config || null);
+                setGuardianAutotuneLifecycle({
+                    proposal: payload.proposal || null,
+                    lifecycle: payload.lifecycle || {}
+                });
+                setGuardianAutotuneDirty(false);
+            }
+            if (autotuneHistoryRes.status === 'fulfilled') {
+                const historyPayload = autotuneHistoryRes.value.data || {};
+                setGuardianAutotuneHistory(historyPayload.history || []);
+                setGuardianAutotuneMetrics(historyPayload.metrics || null);
+            }
+            if (autotuneEvalLogsRes.status === 'fulfilled') {
+                const evalLogPayload = autotuneEvalLogsRes.value.data || {};
+                setGuardianAutotuneEvalLogs(evalLogPayload.logs || []);
+            }
         } catch (e) {
             console.error(e);
             setError('加载数据失败');
@@ -99,7 +390,7 @@ export default function Home() {
             setActionLoading(true);
             setError(null);
             await api.post(`/tasks/${currentTask.id}/complete`);
-            await fetchAll(); // 刷新所有数据
+            await fetchAll();
         } catch (e) {
             console.error(e);
             setError('完成任务失败: ' + (e.response?.data?.detail || e.message));
@@ -108,15 +399,30 @@ export default function Home() {
         }
     };
 
-    const handleSkip = async () => {
+    const openSkipDialog = () => {
         if (!currentTask || actionLoading) return;
+        setSkipReason('');
+        setSkipContext('recovering');
+        setSkipDialogOpen(true);
+    };
+
+    const submitSkip = async () => {
+        if (!currentTask || actionLoading) return;
+        if (!skipReason.trim()) {
+            setError('请输入跳过原因');
+            return;
+        }
         try {
-            const reason = prompt("跳过原因？");
-            if (reason) {
-                setActionLoading(true);
-                await api.post(`/tasks/${currentTask.id}/skip`, { reason });
-                await fetchAll();
-            }
+            setActionLoading(true);
+            setError(null);
+            await api.post(`/tasks/${currentTask.id}/skip`, {
+                reason: skipReason.trim(),
+                context: skipContext
+            });
+            setSkipDialogOpen(false);
+            setSkipReason('');
+            setSkipContext('recovering');
+            await fetchAll();
         } catch (e) {
             console.error(e);
             setError('跳过任务失败: ' + (e.response?.data?.detail || e.message));
@@ -125,28 +431,889 @@ export default function Home() {
         }
     };
 
-    const handleDeleteGoal = async (goalId, e) => {
+    const askDeleteGoal = (goalId, e) => {
         e?.preventDefault();
         e?.stopPropagation();
-        if (!window.confirm('确定要删除这个目标吗？')) return;
+        if (actionLoading) return;
+        setDeleteTargetGoalId(goalId);
+    };
+
+    const confirmDeleteGoal = async () => {
+        if (!deleteTargetGoalId || actionLoading) return;
         try {
             setActionLoading(true);
-            await api.delete(`/goals/${goalId}`);
+            setError(null);
+            await api.delete(`/goals/${deleteTargetGoalId}`);
+            setDeleteTargetGoalId(null);
             await fetchAll();
         } catch (e) {
             console.error(e);
-            setError('删除失败');
+            setError('删除失败: ' + (e.response?.data?.detail || e.message));
         } finally {
             setActionLoading(false);
         }
     };
 
-    // 计算目标进度
+    const handleGuardianResponse = async (action) => {
+        if (!retrospective || guardianResponseLoading) return;
+        try {
+            setGuardianResponseLoading(true);
+            setError(null);
+            await api.post('/retrospective/respond', {
+                days: retrospective.period?.days ?? 7,
+                fingerprint:
+                    retrospective.response_action?.fingerprint
+                    ?? retrospective.confirmation_action?.fingerprint
+                    ?? null,
+                action,
+                context: guardianResponseContext
+            });
+            await fetchAll();
+        } catch (e) {
+            console.error(e);
+            setError('提交 Guardian 响应失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianResponseLoading(false);
+        }
+    };
+
+    const handleConfirmIntervention = async () => {
+        await handleGuardianResponse('confirm');
+    };
+
+    const handleApplyRecoveryBatch = async () => {
+        if (recoveryBatchLoading) return;
+        try {
+            setRecoveryBatchLoading(true);
+            setError(null);
+            await api.post('/tasks/recovery/batch/apply');
+            await fetchAll();
+        } catch (e) {
+            console.error(e);
+            setError('应用恢复批处理失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setRecoveryBatchLoading(false);
+        }
+    };
+
+    const handleL2SessionAction = async (action) => {
+        if (l2SessionActionLoading) return;
+        const actionSpec = retrospective?.l2_session_action || {};
+        const activeSessionId = retrospective?.l2_session?.active_session_id || null;
+        const resumeSessionId = retrospective?.l2_session?.resume_session_id
+            || actionSpec?.resume?.session_id
+            || null;
+        const endpointMap = {
+            start: actionSpec.start?.endpoint || '/l2/session/start',
+            resume: actionSpec.resume?.endpoint || '/l2/session/resume',
+            interrupt: actionSpec.interrupt?.endpoint || '/l2/session/interrupt',
+            complete: actionSpec.complete?.endpoint || '/l2/session/complete'
+        };
+        const endpoint = endpointMap[action];
+        if (!endpoint) return;
+
+        const payload = {};
+        if (action !== 'start' && action !== 'resume' && activeSessionId) {
+            payload.session_id = activeSessionId;
+        }
+        if (action === 'resume' && resumeSessionId) {
+            payload.session_id = resumeSessionId;
+        }
+        if (action === 'interrupt') {
+            payload.reason = l2InterruptReason;
+        }
+        if (action === 'start') {
+            const intention = (l2StartIntention || '').trim();
+            if (intention) payload.intention = intention;
+        }
+        if (action === 'resume') {
+            const step = (l2ResumeStep || '').trim();
+            if (step) payload.resume_step = step;
+        }
+        if (action === 'complete') {
+            const reflection = (l2CompletionReflection || '').trim();
+            if (reflection) payload.reflection = reflection;
+        }
+
+        try {
+            setL2SessionActionLoading(true);
+            setError(null);
+            await api.post(endpoint, payload);
+            if (action === 'start') {
+                setL2StartIntention('');
+            } else if (action === 'resume') {
+                setL2ResumeStep('');
+            } else if (action === 'complete') {
+                setL2CompletionReflection('');
+            }
+            await fetchAll();
+        } catch (e) {
+            console.error(e);
+            setError('更新 L2 会话失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setL2SessionActionLoading(false);
+        }
+    };
+
+    const handleCheckAnchorDiff = async () => {
+        if (anchorDiffLoading) return;
+        try {
+            setAnchorDiffLoading(true);
+            setError(null);
+            const res = await api.get('/anchor/diff');
+            setAnchorDiff(res.data || null);
+        } catch (e) {
+            console.error(e);
+            setError('检查 Anchor 变更失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setAnchorDiffLoading(false);
+        }
+    };
+
+    const handleActivateAnchor = async () => {
+        if (activateAnchorLoading) return;
+        try {
+            setActivateAnchorLoading(true);
+            setError(null);
+            const res = await api.post('/anchor/activate', { force: false });
+            if (res.data?.effect) {
+                setAnchorEffect(res.data.effect);
+            }
+            if (res.data?.status === 'noop') {
+                setError('Anchor 内容无变化，无需激活');
+            }
+            setActivateAnchorModalOpen(false);
+            setAnchorDiff(null);
+            await fetchAll();
+        } catch (e) {
+            console.error(e);
+            setError('激活 Anchor 失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setActivateAnchorLoading(false);
+        }
+    };
+
+    const updateGuardianConfigField = (section, key, rawValue) => {
+        setGuardianConfig((prev) => {
+            if (!prev?.thresholds) return prev;
+            return {
+                ...prev,
+                thresholds: {
+                    ...prev.thresholds,
+                    [section]: {
+                        ...(prev.thresholds?.[section] || {}),
+                        [key]: rawValue
+                    }
+                }
+            };
+        });
+        setGuardianConfigDirty(true);
+    };
+
+    const updateGuardianInterventionLevel = (value) => {
+        setGuardianConfig((prev) => {
+            if (!prev) return prev;
+            return { ...prev, intervention_level: value };
+        });
+        setGuardianConfigDirty(true);
+    };
+
+    const refreshGuardianConfig = async () => {
+        if (guardianConfigLoading) return;
+        try {
+            setGuardianConfigLoading(true);
+            const res = await api.get('/guardian/config');
+            setGuardianConfig(res.data?.config || null);
+            setGuardianConfigDirty(false);
+        } catch (e) {
+            console.error(e);
+            setError('刷新阈值配置失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianConfigLoading(false);
+        }
+    };
+
+    const saveGuardianConfig = async () => {
+        if (!guardianConfig || guardianConfigSaving) return;
+        try {
+            setGuardianConfigSaving(true);
+            setError(null);
+            const payload = {
+                intervention_level: guardianConfig.intervention_level || 'SOFT',
+                deviation_signals: {
+                    repeated_skip: Number(guardianConfig.thresholds?.deviation_signals?.repeated_skip ?? 2),
+                    l2_interruption: Number(guardianConfig.thresholds?.deviation_signals?.l2_interruption ?? 1),
+                    stagnation_days: Number(guardianConfig.thresholds?.deviation_signals?.stagnation_days ?? 3)
+                },
+                l2_protection: {
+                    high: Number(guardianConfig.thresholds?.l2_protection?.high ?? 0.75),
+                    medium: Number(guardianConfig.thresholds?.l2_protection?.medium ?? 0.5)
+                }
+            };
+            if (guardianConfig.authority) {
+                payload.authority = {
+                    escalation: {
+                        window_days: Number(guardianConfig.authority?.escalation?.window_days ?? 7),
+                        firm_reminder_resistance: Number(guardianConfig.authority?.escalation?.firm_reminder_resistance ?? 2),
+                        periodic_check_resistance: Number(guardianConfig.authority?.escalation?.periodic_check_resistance ?? 4)
+                    },
+                    safe_mode: {
+                        enabled: Boolean(guardianConfig.authority?.safe_mode?.enabled ?? true),
+                        resistance_threshold: Number(guardianConfig.authority?.safe_mode?.resistance_threshold ?? 5),
+                        min_response_events: Number(guardianConfig.authority?.safe_mode?.min_response_events ?? 3),
+                        max_confirmation_ratio: Number(guardianConfig.authority?.safe_mode?.max_confirmation_ratio ?? 0.34),
+                        recovery_confirmations: Number(guardianConfig.authority?.safe_mode?.recovery_confirmations ?? 2),
+                        cooldown_hours: Number(guardianConfig.authority?.safe_mode?.cooldown_hours ?? 24)
+                    }
+                };
+            }
+            const res = await api.put('/guardian/config', payload);
+            setGuardianConfig(res.data?.config || guardianConfig);
+            setGuardianConfigDirty(false);
+            setGuardianConfigSavedAt(new Date().toISOString());
+            await fetchAll();
+        } catch (e) {
+            console.error(e);
+            setError('保存 Guardian 阈值失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianConfigSaving(false);
+        }
+    };
+
+    const updateGuardianBoundariesField = (key, rawValue) => {
+        setGuardianBoundariesConfig((prev) => {
+            if (!prev) return prev;
+            return { ...prev, [key]: rawValue };
+        });
+        setGuardianBoundariesDirty(true);
+    };
+
+    const updateGuardianBoundariesQuietHoursField = (key, rawValue) => {
+        setGuardianBoundariesConfig((prev) => {
+            if (!prev) return prev;
+            return {
+                ...prev,
+                quiet_hours: {
+                    ...(prev.quiet_hours || {}),
+                    [key]: rawValue
+                }
+            };
+        });
+        setGuardianBoundariesDirty(true);
+    };
+
+    const refreshGuardianBoundariesConfig = async () => {
+        if (guardianBoundariesLoading) return;
+        try {
+            setGuardianBoundariesLoading(true);
+            const res = await api.get('/guardian/boundaries/config');
+            setGuardianBoundariesConfig(res.data?.config || null);
+            setGuardianBoundariesDirty(false);
+        } catch (e) {
+            console.error(e);
+            setError('刷新边界配置失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianBoundariesLoading(false);
+        }
+    };
+
+    const saveGuardianBoundariesConfig = async () => {
+        if (!guardianBoundariesConfig || guardianBoundariesSaving) return;
+        try {
+            setGuardianBoundariesSaving(true);
+            setError(null);
+            const payload = {
+                reminder_frequency: guardianBoundariesConfig?.reminder_frequency || 'balanced',
+                reminder_channel: guardianBoundariesConfig?.reminder_channel || 'in_app',
+                quiet_hours: {
+                    enabled: Boolean(guardianBoundariesConfig?.quiet_hours?.enabled ?? true),
+                    start_hour: Number(guardianBoundariesConfig?.quiet_hours?.start_hour ?? 22),
+                    end_hour: Number(guardianBoundariesConfig?.quiet_hours?.end_hour ?? 8),
+                    timezone: guardianBoundariesConfig?.quiet_hours?.timezone || 'local'
+                }
+            };
+            const res = await api.put('/guardian/boundaries/config', payload);
+            setGuardianBoundariesConfig(res.data?.config || guardianBoundariesConfig);
+            setGuardianBoundariesDirty(false);
+            setGuardianBoundariesSavedAt(new Date().toISOString());
+            await fetchAll();
+        } catch (e) {
+            console.error(e);
+            setError('保存边界配置失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianBoundariesSaving(false);
+        }
+    };
+
+    const refreshGuardianAutotuneState = async () => {
+        if (guardianAutotuneLoading) return;
+        try {
+            setGuardianAutotuneLoading(true);
+            const [lifecycleRes, historyRes, evalLogsRes] = await Promise.all([
+                api.get('/guardian/autotune/lifecycle/latest'),
+                api.get('/guardian/autotune/lifecycle/history', { params: { days: 14, limit: 12 } }),
+                api.get('/guardian/autotune/evaluation/logs', { params: { days: 14, limit: 8 } })
+            ]);
+            const lifecyclePayload = lifecycleRes.data || {};
+            setGuardianAutotuneConfig(lifecyclePayload.config || null);
+            setGuardianAutotuneLifecycle({
+                proposal: lifecyclePayload.proposal || null,
+                lifecycle: lifecyclePayload.lifecycle || {}
+            });
+            const historyPayload = historyRes.data || {};
+            setGuardianAutotuneHistory(historyPayload.history || []);
+            setGuardianAutotuneMetrics(historyPayload.metrics || null);
+            const evalLogsPayload = evalLogsRes.data || {};
+            setGuardianAutotuneEvalLogs(evalLogsPayload.logs || []);
+            setGuardianAutotuneDirty(false);
+        } catch (e) {
+            console.error(e);
+            setError('刷新 Autotune 状态失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianAutotuneLoading(false);
+        }
+    };
+
+    const updateGuardianAutotuneRootField = (key, rawValue) => {
+        setGuardianAutotuneConfig((prev) => {
+            if (!prev) return prev;
+            return { ...prev, [key]: rawValue };
+        });
+        setGuardianAutotuneDirty(true);
+    };
+
+    const updateGuardianAutotuneNestedField = (section, key, rawValue) => {
+        setGuardianAutotuneConfig((prev) => {
+            if (!prev) return prev;
+            return {
+                ...prev,
+                [section]: {
+                    ...(prev?.[section] || {}),
+                    [key]: rawValue
+                }
+            };
+        });
+        setGuardianAutotuneDirty(true);
+    };
+
+    const saveGuardianAutotuneConfig = async () => {
+        if (!guardianAutotuneConfig || guardianAutotuneSaving) return;
+        try {
+            setGuardianAutotuneSaving(true);
+            setError(null);
+            const payload = {
+                enabled: Boolean(guardianAutotuneConfig.enabled ?? false),
+                mode: guardianAutotuneConfig.mode || 'shadow',
+                llm_enabled: Boolean(guardianAutotuneConfig.llm_enabled ?? true),
+                trigger: {
+                    lookback_days: Number(guardianAutotuneConfig?.trigger?.lookback_days ?? 7),
+                    min_event_count: Number(guardianAutotuneConfig?.trigger?.min_event_count ?? 20),
+                    cooldown_hours: Number(guardianAutotuneConfig?.trigger?.cooldown_hours ?? 24)
+                },
+                guardrails: {
+                    max_int_step: Number(guardianAutotuneConfig?.guardrails?.max_int_step ?? 1),
+                    max_float_step: Number(guardianAutotuneConfig?.guardrails?.max_float_step ?? 0.05),
+                    min_confidence: Number(guardianAutotuneConfig?.guardrails?.min_confidence ?? 0.55)
+                },
+                auto_evaluate: {
+                    enabled: Boolean(guardianAutotuneConfig?.auto_evaluate?.enabled ?? true),
+                    horizon_hours: Number(guardianAutotuneConfig?.auto_evaluate?.horizon_hours ?? 48),
+                    lookback_days: Number(guardianAutotuneConfig?.auto_evaluate?.lookback_days ?? 90),
+                    max_targets_per_cycle: Number(guardianAutotuneConfig?.auto_evaluate?.max_targets_per_cycle ?? 3)
+                }
+            };
+            const res = await api.put('/guardian/autotune/config', payload);
+            setGuardianAutotuneConfig(res.data?.config || guardianAutotuneConfig);
+            setGuardianAutotuneDirty(false);
+            setGuardianAutotuneSavedAt(new Date().toISOString());
+            await refreshGuardianAutotuneState();
+        } catch (e) {
+            console.error(e);
+            setError('保存 Autotune 配置失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianAutotuneSaving(false);
+        }
+    };
+
+    const runGuardianAutotuneProposal = async () => {
+        if (guardianAutotuneActionLoading) return;
+        try {
+            setGuardianAutotuneActionLoading(true);
+            setError(null);
+            await api.post('/guardian/autotune/shadow/run', { trigger: 'manual' });
+            await refreshGuardianAutotuneState();
+        } catch (e) {
+            console.error(e);
+            setError('运行 Autotune 提议失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianAutotuneActionLoading(false);
+        }
+    };
+
+    const runGuardianAutotuneLifecycleAction = async (action) => {
+        if (guardianAutotuneActionLoading) return;
+        const proposal = guardianAutotuneLifecycle?.proposal || {};
+        const latestApplied = guardianAutotuneLifecycle?.lifecycle?.latest_applied?.payload || {};
+        const proposalId = (action === 'rollback' || action === 'evaluate')
+            ? (latestApplied.proposal_id || null)
+            : (proposal.proposal_id || null);
+        const fingerprint = (action === 'rollback' || action === 'evaluate')
+            ? (latestApplied.fingerprint || null)
+            : (proposal.fingerprint || null);
+        const reasonMap = {
+            review: 'manual_review',
+            apply: 'manual_apply',
+            reject: 'manual_reject',
+            rollback: 'manual_rollback',
+            evaluate: 'manual_evaluate'
+        };
+        try {
+            setGuardianAutotuneActionLoading(true);
+            setError(null);
+            await api.post(`/guardian/autotune/lifecycle/${action}`, {
+                proposal_id: proposalId,
+                fingerprint,
+                actor: 'home_dashboard',
+                source: 'manual',
+                reason: reasonMap[action] || 'manual_action'
+            });
+            await refreshGuardianAutotuneState();
+            await fetchAll();
+        } catch (e) {
+            console.error(e);
+            setError(`执行 Autotune ${action} 失败: ` + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianAutotuneActionLoading(false);
+        }
+    };
+
+    const getAutotuneEvalLogKey = (item, idx) => `${item?.timestamp || 'unknown'}_${idx}`;
+    const getAutotuneRetryResultKey = (entry, idx) => `${entry?.proposal_id || 'unknown'}_${entry?.fingerprint || 'unknown'}_${idx}`;
+
+    const toggleGuardianAutotuneEvalLog = (logKey) => {
+        setGuardianAutotuneExpandedLogMap((prev) => ({
+            ...prev,
+            [logKey]: !prev?.[logKey]
+        }));
+    };
+
+    const closeGuardianAutotuneRetryResultModal = () => {
+        setGuardianAutotuneRetryResult(null);
+        setGuardianAutotuneRetryCopiedKey(null);
+    };
+
+    const copyGuardianAutotuneRetryContext = async (payload, copiedKey) => {
+        try {
+            await copyTextToClipboard(JSON.stringify(payload, null, 2));
+            setGuardianAutotuneRetryCopiedKey(copiedKey);
+            setError(null);
+        } catch (e) {
+            console.error(e);
+            setError('复制错误上下文失败: ' + extractApiErrorDetail(e));
+        }
+    };
+
+    const copyGuardianAutotuneRetryFailureContext = async (entry, idx) => {
+        if (!entry || entry.status !== 'failed') return;
+        await copyGuardianAutotuneRetryContext(
+            entry.error_context || {},
+            getAutotuneRetryResultKey(entry, idx)
+        );
+    };
+
+    const copyAllGuardianAutotuneRetryFailureContexts = async () => {
+        const retryResultItems = Array.isArray(guardianAutotuneRetryResult?.results)
+            ? guardianAutotuneRetryResult.results
+            : [];
+        const failedEntries = retryResultItems.filter((entry) => entry?.status === 'failed');
+        if (!failedEntries.length) return;
+        const payload = {
+            source_log_timestamp: guardianAutotuneRetryResult?.logTimestamp || null,
+            copied_at: new Date().toISOString(),
+            failures: failedEntries.map((entry, idx) => ({
+                index: idx + 1,
+                proposal_id: entry?.proposal_id || null,
+                fingerprint: entry?.fingerprint || null,
+                error_context: entry?.error_context || {}
+            }))
+        };
+        await copyGuardianAutotuneRetryContext(payload, 'all_failures');
+    };
+
+    const retryFailedGuardianAutotuneEvaluate = async (item, idx) => {
+        if (guardianAutotuneActionLoading) return;
+        const rawErrors = Array.isArray(item?.errors) ? item.errors : [];
+        const retryTargets = rawErrors.filter((err) => {
+            const proposalId = String(err?.proposal_id || '').trim();
+            const fingerprint = String(err?.fingerprint || '').trim();
+            return proposalId && fingerprint;
+        });
+        if (retryTargets.length === 0) {
+            setError('该日志没有可重跑的失败项（缺少 proposal_id/fingerprint）。');
+            return;
+        }
+
+        const logKey = getAutotuneEvalLogKey(item, idx);
+        const retryNote = `retry_from_log:${item?.timestamp || 'unknown'}`;
+        try {
+            setGuardianAutotuneActionLoading(true);
+            setGuardianAutotuneRetryLogKey(logKey);
+            setGuardianAutotuneRetryResult(null);
+            setGuardianAutotuneRetryCopiedKey(null);
+            setError(null);
+            const settled = await Promise.allSettled(
+                retryTargets.map((err) =>
+                    api.post('/guardian/autotune/lifecycle/evaluate', {
+                        proposal_id: err.proposal_id,
+                        fingerprint: err.fingerprint,
+                        actor: 'home_dashboard',
+                        source: 'manual',
+                        reason: 'retry_failed_cycle_evaluate',
+                        note: retryNote,
+                        force: true
+                    })
+                )
+            );
+            const retryResults = settled.map((entry, entryIdx) => {
+                const target = retryTargets[entryIdx] || {};
+                if (entry.status === 'fulfilled') {
+                    const responseData = entry.value?.data || {};
+                    const evaluation = responseData?.evaluation || {};
+                    return {
+                        proposal_id: target.proposal_id || null,
+                        fingerprint: target.fingerprint || null,
+                        status: 'success',
+                        api_status: responseData?.status || 'ok',
+                        status_code: entry.value?.status ?? null,
+                        detail: null,
+                        evaluated_at: evaluation?.evaluated_at || null,
+                        trust_delta_status: evaluation?.trust_delta_status || null,
+                        error_context: null
+                    };
+                }
+
+                const reason = entry.reason;
+                const statusCode = reason?.response?.status ?? target?.status_code ?? null;
+                const detail = extractApiErrorDetail(reason);
+                return {
+                    proposal_id: target.proposal_id || null,
+                    fingerprint: target.fingerprint || null,
+                    status: 'failed',
+                    api_status: 'error',
+                    status_code: statusCode,
+                    detail,
+                    evaluated_at: null,
+                    trust_delta_status: null,
+                    error_context: {
+                        source_log_timestamp: item?.timestamp || null,
+                        retry_target_index: entryIdx + 1,
+                        proposal_id: target.proposal_id || null,
+                        fingerprint: target.fingerprint || null,
+                        request_payload: {
+                            proposal_id: target.proposal_id || null,
+                            fingerprint: target.fingerprint || null,
+                            actor: 'home_dashboard',
+                            source: 'manual',
+                            reason: 'retry_failed_cycle_evaluate',
+                            note: retryNote,
+                            force: true
+                        },
+                        previous_cycle_error: {
+                            status_code: target?.status_code ?? null,
+                            detail: target?.detail || null
+                        },
+                        retry_error: {
+                            status_code: statusCode,
+                            detail,
+                            response_payload: reason?.response?.data || null
+                        }
+                    }
+                };
+            });
+            const successCount = retryResults.filter((entry) => entry.status === 'success').length;
+            const failedCount = retryResults.length - successCount;
+            setGuardianAutotuneRetryResult({
+                logTimestamp: item?.timestamp || null,
+                finishedAt: new Date().toISOString(),
+                totalCount: retryResults.length,
+                successCount,
+                failedCount,
+                results: retryResults
+            });
+            await refreshGuardianAutotuneState();
+            await fetchAll();
+            if (failedCount > 0) {
+                setError(`重跑完成：成功 ${successCount}，失败 ${failedCount}`);
+            }
+        } catch (e) {
+            console.error(e);
+            setError('重跑失败项评估失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianAutotuneRetryLogKey(null);
+            setGuardianAutotuneActionLoading(false);
+        }
+    };
+
     const getGoalProgress = (goalId) => {
-        const goalTasks = [...tasks.pending, ...tasks.completed].filter(t => t.goal_id === goalId);
-        const completedCount = tasks.completed.filter(t => t.goal_id === goalId).length;
+        const goalTasks = [...(tasks.pending || []), ...(tasks.completed || [])].filter((t) => t.goal_id === goalId);
+        const completedCount = (tasks.completed || []).filter((t) => t.goal_id === goalId).length;
         return { completed: completedCount, total: goalTasks.length };
     };
+
+    const standaloneGoals = useMemo(
+        () => (goals.active || []).filter((g) => !g.parent_id && g.layer !== 'vision'),
+        [goals.active]
+    );
+    const anchorDiffStatus = anchorDiff?.diff?.status || null;
+    const canActivateAnchor = anchorDiffStatus === 'new' || anchorDiffStatus === 'changed';
+    const effectBeforeAvg = Number(anchorEffect?.before?.avg_score);
+    const effectAfterAvg = Number(anchorEffect?.after?.avg_score);
+    const hasEffectDelta = Number.isFinite(effectBeforeAvg) && Number.isFinite(effectAfterAvg);
+    const effectDeltaLabel = hasEffectDelta
+        ? `${effectAfterAvg - effectBeforeAvg >= 0 ? '+' : ''}${(effectAfterAvg - effectBeforeAvg).toFixed(1)}`
+        : '--';
+    const l2ProtectionRatio = Number(retrospective?.l2_protection?.ratio);
+    const l2ProtectionLabel = Number.isFinite(l2ProtectionRatio)
+        ? `${Math.round(l2ProtectionRatio * 100)}%`
+        : '--';
+    const l2ProtectionLevel = retrospective?.l2_protection?.level || 'unknown';
+    const l2ProtectionColorMap = {
+        high: '#86efac',
+        medium: '#fcd34d',
+        low: '#fca5a5',
+        unknown: '#cbd5e1'
+    };
+    const l2TrendPoints = (retrospective?.l2_protection?.trend || []).slice(-7);
+    const l2ThresholdHigh = Number(retrospective?.l2_protection?.thresholds?.high);
+    const l2ThresholdMedium = Number(retrospective?.l2_protection?.thresholds?.medium);
+    const l2ThresholdLabel = Number.isFinite(l2ThresholdHigh) && Number.isFinite(l2ThresholdMedium)
+        ? `阈值: 高 ≥ ${Math.round(l2ThresholdHigh * 100)}% · 中 ≥ ${Math.round(l2ThresholdMedium * 100)}%`
+        : null;
+    const guardianAuthority = retrospective?.authority || {};
+    const guardianEscalation = guardianAuthority?.escalation || {};
+    const guardianSafeMode = guardianAuthority?.safe_mode || {};
+    const guardianEscalationStage = guardianEscalation?.stage || 'gentle_nudge';
+    const guardianEscalationLabel = escalationStageMap[guardianEscalationStage] || guardianEscalationStage;
+    const guardianLatestResponse = retrospective?.response_action?.latest || null;
+    const guardianLatestRecoveryStep = guardianLatestResponse?.recovery_step || null;
+    const guardianRole = retrospective?.guardian_role || {};
+    const guardianRoleRepresentingLabel = guardianRole?.representing_label || '价值自我';
+    const guardianRoleFacingLabel = guardianRole?.facing_label || '本能自我';
+    const guardianRoleMessage = guardianRole?.message || '系统正在代表价值自我，守护长期目标。';
+    const guardianLatestResponseContextLabel = guardianLatestResponse?.context_label
+        || responseContextLabelMap[guardianLatestResponse?.context]
+        || guardianLatestResponse?.context
+        || '--';
+    const humanizationMetrics = retrospective?.humanization_metrics || {};
+    const recoveryAdoptionMetric = humanizationMetrics?.recovery_adoption_rate || {};
+    const recoveryAdoptionRate = Number(recoveryAdoptionMetric?.rate);
+    const recoveryAdoptionLabel = Number.isFinite(recoveryAdoptionRate)
+        ? `${Math.round(recoveryAdoptionRate * 100)}%`
+        : '--';
+    const frictionLoadMetric = humanizationMetrics?.friction_load || {};
+    const frictionLoadScore = Number(frictionLoadMetric?.score);
+    const frictionLoadLabel = Number.isFinite(frictionLoadScore)
+        ? `${Math.round(frictionLoadScore * 100)}%`
+        : '--';
+    const frictionLoadLevel = frictionLoadMetric?.level || 'unknown';
+    const frictionLoadColorMap = {
+        high: '#fca5a5',
+        medium: '#fcd34d',
+        low: '#86efac',
+        unknown: '#cbd5e1'
+    };
+    const supportVsOverrideMetric = humanizationMetrics?.support_vs_override || {};
+    const supportVsOverrideRatio = Number(supportVsOverrideMetric?.support_ratio);
+    const supportVsOverrideLabel = Number.isFinite(supportVsOverrideRatio)
+        ? `${Math.round(supportVsOverrideRatio * 100)}%`
+        : '--';
+    const supportVsOverrideMode = supportVsOverrideMetric?.mode || 'insufficient_data';
+    const supportVsOverrideModeLabel = supportModeLabelMap[supportVsOverrideMode] || supportVsOverrideMode;
+    const trustCalibrationMetrics = humanizationMetrics?.trust_calibration || {};
+    const perceivedControlMetric = trustCalibrationMetrics?.perceived_control_score || {};
+    const interruptionBurdenMetric = trustCalibrationMetrics?.interruption_burden_rate || {};
+    const recoveryToResumeMetric = trustCalibrationMetrics?.recovery_time_to_resume_minutes || {};
+    const mundaneSavedMetric = trustCalibrationMetrics?.mundane_time_saved_hours || {};
+    const perceivedControlScore = Number(perceivedControlMetric?.score);
+    const interruptionBurdenRate = Number(interruptionBurdenMetric?.rate);
+    const recoveryToResumeMinutes = Number(recoveryToResumeMetric?.median_minutes);
+    const mundaneSavedHours = Number(mundaneSavedMetric?.hours);
+    const perceivedControlLabel = Number.isFinite(perceivedControlScore)
+        ? `${Math.round(perceivedControlScore * 100)}%`
+        : '--';
+    const interruptionBurdenLabel = Number.isFinite(interruptionBurdenRate)
+        ? `${Math.round(interruptionBurdenRate * 100)}%`
+        : '--';
+    const recoveryToResumeLabel = Number.isFinite(recoveryToResumeMinutes)
+        ? `${Math.round(recoveryToResumeMinutes)} min`
+        : '--';
+    const mundaneSavedLabel = Number.isFinite(mundaneSavedHours)
+        ? `${mundaneSavedHours.toFixed(2)}h`
+        : '--';
+    const interventionPolicy = retrospective?.intervention_policy || {};
+    const interventionPolicyModeMap = {
+        trust_repair: '信任修复',
+        support_recovery: '支持恢复',
+        focused_override: '坚定纠偏',
+        low_frequency_observe: '低频观察',
+        balanced_intervention: '平衡干预'
+    };
+    const interventionPolicyMode = interventionPolicy?.mode || 'balanced_intervention';
+    const interventionPolicyLabel = interventionPolicyModeMap[interventionPolicyMode] || interventionPolicyMode;
+    const interventionFrictionBudget = interventionPolicy?.friction_budget || {};
+    const reminderWindowLabel = interventionFrictionBudget?.window_hours
+        ? `${interventionFrictionBudget.recent_prompt_count ?? 0}/${interventionFrictionBudget.max_prompts ?? '--'} (${interventionFrictionBudget.window_hours}h)`
+        : '--';
+    const interventionSuppressed = Boolean(interventionFrictionBudget?.suppressed);
+    const interventionCooldownLabel = interventionFrictionBudget?.cooldown_active
+        ? `${interventionFrictionBudget.cooldown_remaining_minutes ?? 0} 分钟`
+        : '无';
+    const trustRepairPolicy = interventionPolicy?.trust_repair || {};
+    const trustRepairActive = Boolean(trustRepairPolicy?.active);
+    const trustRepairMinStep = trustRepairPolicy?.repair_min_step || null;
+    const northStarMetrics = retrospective?.north_star_metrics || {};
+    const northStarTargets = northStarMetrics?.targets_met || {};
+    const mundaneCoverageMetric = northStarMetrics?.mundane_automation_coverage || {};
+    const mundaneCoverageRate = Number(mundaneCoverageMetric?.rate);
+    const mundaneCoverageLabel = Number.isFinite(mundaneCoverageRate)
+        ? `${Math.round(mundaneCoverageRate * 100)}%`
+        : '--';
+    const l2BloomMetric = northStarMetrics?.l2_bloom_hours || {};
+    const l2BloomHours = Number(l2BloomMetric?.hours);
+    const l2BloomBaseline = Number(l2BloomMetric?.baseline_hours);
+    const l2BloomDeltaRatio = Number(l2BloomMetric?.delta_ratio);
+    const l2BloomHoursLabel = Number.isFinite(l2BloomHours) ? `${l2BloomHours.toFixed(1)}h` : '--';
+    const l2BloomDeltaLabel = Number.isFinite(l2BloomDeltaRatio)
+        ? `${l2BloomDeltaRatio >= 0 ? '+' : ''}${Math.round(l2BloomDeltaRatio * 100)}%`
+        : '--';
+    const humanTrustMetric = northStarMetrics?.human_trust_index || {};
+    const humanTrustScore = Number(humanTrustMetric?.score);
+    const humanTrustLabel = Number.isFinite(humanTrustScore)
+        ? `${Math.round(humanTrustScore * 100)}%`
+        : '--';
+    const alignmentDeltaMetric = northStarMetrics?.alignment_delta_weekly || {};
+    const alignmentDeltaValue = Number(alignmentDeltaMetric?.delta);
+    const alignmentDeltaLabel = Number.isFinite(alignmentDeltaValue)
+        ? `${alignmentDeltaValue >= 0 ? '+' : ''}${alignmentDeltaValue.toFixed(1)}`
+        : '--';
+    const northStarMetCount = Number(northStarTargets?.met_count);
+    const northStarTotal = Number(northStarTargets?.total);
+    const northStarSummaryLabel = Number.isFinite(northStarMetCount) && Number.isFinite(northStarTotal) && northStarTotal > 0
+        ? `${northStarMetCount}/${northStarTotal} 达标`
+        : '暂无达标统计';
+    const metricStatusLabel = (flag) => {
+        if (flag === true) return '达标';
+        if (flag === false) return '未达标';
+        return '待评估';
+    };
+    const explainability = retrospective?.explainability || {};
+    const guardianExplainWhy = explainability?.why_this_suggestion
+        || retrospective?.suggestion
+        || '暂无解释';
+    const guardianExplainNext = explainability?.what_happens_next
+        || '系统将继续观察并在下一轮复盘更新建议。';
+    const guardianExplainSignals = Array.isArray(explainability?.active_signals)
+        ? explainability.active_signals
+        : [];
+    const l2Session = retrospective?.l2_session || {};
+    const l2SessionAction = retrospective?.l2_session_action || {};
+    const l2SessionActive = Boolean(l2Session?.active_session);
+    const l2SessionActiveId = l2Session?.active_session_id || null;
+    const l2SessionResumeReady = Boolean(l2Session?.resume_ready);
+    const l2SessionResumeId = l2Session?.resume_session_id || l2SessionAction?.resume?.session_id || null;
+    const l2SessionResumeHint = l2SessionAction?.resume?.minimal_step || l2Session?.resume_hint || '';
+    const l2SessionCompletionRate = Number(l2Session?.completion_rate);
+    const l2SessionCompletionLabel = Number.isFinite(l2SessionCompletionRate)
+        ? `${Math.round(l2SessionCompletionRate * 100)}%`
+        : '--';
+    const l2SessionRecoveryRate = Number(l2Session?.recovery_rate);
+    const l2SessionRecoveryLabel = Number.isFinite(l2SessionRecoveryRate)
+        ? `${Math.round(l2SessionRecoveryRate * 100)}%`
+        : '--';
+    const l2MicroRitual = l2Session?.micro_ritual || {};
+    const l2StartIntentionRate = Number(l2MicroRitual?.start_intention_rate);
+    const l2StartIntentionRateLabel = Number.isFinite(l2StartIntentionRate)
+        ? `${Math.round(l2StartIntentionRate * 100)}%`
+        : '--';
+    const l2CompletionReflectionRate = Number(l2MicroRitual?.completion_reflection_rate);
+    const l2CompletionReflectionRateLabel = Number.isFinite(l2CompletionReflectionRate)
+        ? `${Math.round(l2CompletionReflectionRate * 100)}%`
+        : '--';
+    const l2SessionRecentEvents = (l2Session?.recent_events || []).slice(-3).reverse();
+    const l2InterruptReasonOptions = l2SessionAction?.interrupt?.reason_options?.length > 0
+        ? l2SessionAction.interrupt.reason_options
+        : [
+            { value: 'context_switch', label: '上下文切换' },
+            { value: 'external_interrupt', label: '外部打断' },
+            { value: 'energy_drop', label: '精力下滑' },
+            { value: 'tooling_blocked', label: '工具阻塞' },
+            { value: 'other', label: '其他' }
+        ];
+    const guardianThresholds = guardianConfig?.thresholds || {};
+    const deviationCfg = guardianThresholds.deviation_signals || {};
+    const l2Cfg = guardianThresholds.l2_protection || {};
+    const guardianAutotuneTriggerCfg = guardianAutotuneConfig?.trigger || {};
+    const guardianAutotuneGuardrailsCfg = guardianAutotuneConfig?.guardrails || {};
+    const guardianAutotuneAutoEvalCfg = guardianAutotuneConfig?.auto_evaluate || {};
+    const guardianAutotuneMode = guardianAutotuneConfig?.mode || 'shadow';
+    const guardianAutotuneAssistMode = guardianAutotuneMode === 'assist';
+    const guardianAutotuneProposal = guardianAutotuneLifecycle?.proposal || null;
+    const guardianAutotuneLifecycleData = guardianAutotuneLifecycle?.lifecycle || {};
+    const guardianAutotunePatchItems = guardianAutotuneProposal?.patch
+        ? Object.entries(guardianAutotuneProposal.patch)
+        : [];
+    const guardianAutotuneLatestApplied = guardianAutotuneLifecycleData?.latest_applied?.payload || {};
+    const guardianAutotuneLatestEvaluated = guardianAutotuneLifecycleData?.latest_evaluated?.payload || {};
+    const guardianAutotuneRollbackRec = guardianAutotuneLifecycleData?.rollback_recommendation || {};
+    const guardianAutotuneHistoryItems = Array.isArray(guardianAutotuneHistory)
+        ? guardianAutotuneHistory
+        : [];
+    const guardianAutotuneEvalLogItems = Array.isArray(guardianAutotuneEvalLogs)
+        ? guardianAutotuneEvalLogs
+        : [];
+    const guardianAutotuneRetryResultItems = Array.isArray(guardianAutotuneRetryResult?.results)
+        ? guardianAutotuneRetryResult.results
+        : [];
+    const guardianAutotuneRetryFailedItems = guardianAutotuneRetryResultItems.filter((entry) => entry?.status === 'failed');
+    const guardianAutotuneOpsMetrics = guardianAutotuneMetrics || {};
+    const reviewTurnaroundMetric = guardianAutotuneOpsMetrics?.autotune_review_turnaround_hours || {};
+    const applySuccessMetric = guardianAutotuneOpsMetrics?.autotune_apply_success_rate || {};
+    const rollbackRateMetric = guardianAutotuneOpsMetrics?.autotune_rollback_rate || {};
+    const trustDeltaMetric = guardianAutotuneOpsMetrics?.post_apply_trust_delta_48h || {};
+    const reviewMedianHours = Number(reviewTurnaroundMetric?.median_hours);
+    const applySuccessRate = Number(applySuccessMetric?.rate);
+    const rollbackRate = Number(rollbackRateMetric?.rate);
+    const trustDeltaAvg = Number(trustDeltaMetric?.average_delta);
+    const reviewMedianLabel = Number.isFinite(reviewMedianHours)
+        ? `${reviewMedianHours.toFixed(2)}h`
+        : '--';
+    const applySuccessLabel = Number.isFinite(applySuccessRate)
+        ? `${Math.round(applySuccessRate * 100)}%`
+        : '--';
+    const rollbackRateLabel = Number.isFinite(rollbackRate)
+        ? `${Math.round(rollbackRate * 100)}%`
+        : '--';
+    const trustDeltaLabel = Number.isFinite(trustDeltaAvg)
+        ? `${trustDeltaAvg >= 0 ? '+' : ''}${trustDeltaAvg.toFixed(3)}`
+        : '--';
+    const guardianAutotuneCanReview = Boolean(guardianAutotuneProposal?.proposal_id)
+        && guardianAutotuneAssistMode;
+    const guardianAutotuneCanApply = Boolean(guardianAutotuneProposal?.proposal_id)
+        && guardianAutotuneAssistMode;
+    const guardianAutotuneCanReject = Boolean(guardianAutotuneProposal?.proposal_id)
+        && guardianAutotuneAssistMode;
+    const guardianAutotuneCanRollback = Boolean(guardianAutotuneLatestApplied?.proposal_id)
+        && guardianAutotuneAssistMode;
+    const guardianAutotuneCanEvaluate = Boolean(guardianAutotuneLatestApplied?.proposal_id)
+        && guardianAutotuneAssistMode;
+    const blueprintNarrative = retrospective?.blueprint_narrative || {};
+    const blueprintDimensions = blueprintNarrative?.dimensions || {};
+    const blueprintNarrativeCard = blueprintNarrative?.narrative_card || {};
+    const pendingRecoveryCount = (tasks.pending || []).filter((task) => String(task?.id || '').endsWith('_recovery')).length;
+    const effectiveBoundaries = guardianBoundariesConfig || {};
+    const effectiveQuietHours = effectiveBoundaries?.quiet_hours || {};
+    const boundariesReminderFrequency = effectiveBoundaries?.reminder_frequency || 'balanced';
+    const boundariesReminderChannel = effectiveBoundaries?.reminder_channel || 'in_app';
 
     if (loading) {
         return (
@@ -158,16 +1325,14 @@ export default function Home() {
 
     return (
         <div className="container">
-            {/* Header + 规划/执行 切换 */}
-            <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', flexWrap: 'wrap', gap: '1rem' }}>
-                <h3 style={{ margin: 0, opacity: 0.7 }}>AI Life OS</h3>
+            <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
+                <h3 style={{ margin: 0, opacity: 0.75 }}>AI Life OS</h3>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                    <div className="view-toggle" role="tablist" style={{ display: 'flex', background: 'rgba(0,0,0,0.2)', borderRadius: '8px', padding: '2px' }}>
+                    <div role="tablist" style={{ display: 'flex', background: 'rgba(0,0,0,0.2)', borderRadius: '8px', padding: '2px' }}>
                         <button
                             type="button"
                             role="tab"
                             aria-selected={viewMode === 'execute'}
-                            className={viewMode === 'execute' ? 'view-toggle--active' : ''}
                             onClick={() => setViewMode('execute')}
                             style={{
                                 padding: '0.35rem 0.75rem',
@@ -180,13 +1345,12 @@ export default function Home() {
                                 fontWeight: 500
                             }}
                         >
-                            ⚡ 执行
+                            执行
                         </button>
                         <button
                             type="button"
                             role="tab"
                             aria-selected={viewMode === 'plan'}
-                            className={viewMode === 'plan' ? 'view-toggle--active' : ''}
                             onClick={() => setViewMode('plan')}
                             style={{
                                 padding: '0.35rem 0.75rem',
@@ -199,7 +1363,7 @@ export default function Home() {
                                 fontWeight: 500
                             }}
                         >
-                            🎯 规划
+                            规划
                         </button>
                     </div>
                     <Link to="/vision/new" className="btn btn-primary" style={{ fontSize: '0.875rem' }}>+ 愿景</Link>
@@ -207,330 +1371,1981 @@ export default function Home() {
                 </div>
             </header>
 
-            {/* 周报可查看入口 */}
             {weeklyReviewDue && (
                 <div style={{
                     background: 'rgba(139, 92, 246, 0.15)',
                     border: '1px solid rgba(139, 92, 246, 0.4)',
                     borderRadius: '8px',
                     padding: '0.75rem 1rem',
-                    marginBottom: '1.5rem',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.5rem',
+                    marginBottom: '1rem',
                     color: 'var(--accent-color)'
                 }}>
-                    <span style={{ fontSize: '1rem' }}>📋</span>
-                    <span style={{ fontWeight: 500 }}>周报可查看</span>
-                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>— 向下滚动至「Guardian 复盘」查看本周总结与建议</span>
+                    本周复盘可查看，向下滚动到 Guardian 复盘。
                 </div>
             )}
 
-            {/* Error Banner */}
             {error && (
                 <div style={{
                     background: 'rgba(239, 68, 68, 0.2)',
                     border: '1px solid rgba(239, 68, 68, 0.5)',
                     borderRadius: '8px',
-                    padding: '1rem',
-                    marginBottom: '1.5rem',
+                    padding: '0.75rem 1rem',
+                    marginBottom: '1rem',
                     color: '#fca5a5'
                 }}>
-                    ⚠️ {error}
+                    {error}
                 </div>
             )}
 
-            {/* 我的信息：执行视图下收折为一行，规划视图下完整 */}
             {profile && (
-                <section style={{ marginBottom: viewMode === 'execute' ? '1rem' : '2rem' }}>
-                    {viewMode === 'plan' ? (
-                        <>
-                            <h4 style={{ color: 'var(--accent-color)', marginBottom: '1rem', fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: '1px' }}>
-                                📋 我的信息
-                            </h4>
-                            <div className="glass-card" style={{ padding: '1.5rem' }}>
-                                <div style={{ display: 'flex', gap: '2rem', flexWrap: 'wrap' }}>
-                                    <div>
-                                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>职业</span>
-                                        <div style={{ fontSize: '1.125rem', fontWeight: 500 }}>{profile.occupation || '未设置'}</div>
-                                    </div>
-                                    <div>
-                                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>关注领域</span>
-                                        <div style={{ fontSize: '1.125rem', fontWeight: 500 }}>{profile.focus_area || '未设置'}</div>
-                                    </div>
-                                    <div>
-                                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>每日可用时间</span>
-                                        <div style={{ fontSize: '1.125rem', fontWeight: 500 }}>{profile.daily_hours || '未设置'}</div>
-                                    </div>
-                                </div>
-                            </div>
-                        </>
-                    ) : (
-                        <p style={{ margin: 0, fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
-                            {profile.occupation || '未设置'} · {profile.focus_area || '未设置'} · 可用 {profile.daily_hours || '—'}
-                        </p>
-                    )}
+                <section style={{ marginBottom: '1.5rem' }}>
+                    <p style={{ margin: 0, fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
+                        {profile.occupation || '未设置'} · {profile.focus_area || '未设置'} · 可用 {profile.daily_hours || '--'}
+                    </p>
                 </section>
             )}
 
             {viewMode === 'plan' && (
-            <>
-            {/* 目标层级展示 - 按愿景分块 */}
-            <section style={{ marginBottom: '2rem' }}>
-                <h4 style={{ color: 'var(--accent-color)', marginBottom: '1rem', fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: '1px' }}>
-                    🎯 我的愿景
-                </h4>
-
-                {/* 愿景树形展示 */}
-                {goalTree.length > 0 ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-                        {goalTree.filter(v => v.horizon === 'vision').map(vision => (
-                            <div key={vision.id} className="glass-card" style={{ padding: '1.25rem', borderLeft: '4px solid #f59e0b' }}>
-                                {/* 愿景标题 */}
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
-                                    <div>
-                                        <span style={{ color: '#f59e0b', fontSize: '0.7rem', fontWeight: 600 }}>🌟 愿景</span>
-                                        <h4 style={{ margin: '0.25rem 0 0 0', fontSize: '1.125rem' }}>{vision.title}</h4>
-                                    </div>
-                                    <Link to={`/goals/${vision.id}/decompose`} className="btn btn-secondary" style={{ fontSize: '0.75rem', padding: '0.25rem 0.75rem' }}>
-                                        + 分解
-                                    </Link>
+                <section style={{ marginBottom: '1.5rem' }}>
+                    <h4 style={{ color: 'var(--accent-color)', marginBottom: '0.75rem', fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                        我的愿景与目标
+                    </h4>
+                    <div className="glass-card" style={{ padding: '0.9rem', marginBottom: '0.9rem' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
+                            <div>
+                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>价值对齐视图</div>
+                                <div style={{ marginTop: '0.2rem', fontSize: '0.9rem' }}>
+                                    {anchorSnapshot?.active
+                                        ? `Anchor ${anchorSnapshot.version || ''}`
+                                        : '未激活 Anchor'}
                                 </div>
+                            </div>
+                            <div style={{ display: 'flex', gap: '0.65rem', flexWrap: 'wrap' }}>
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                    平均对齐: {alignmentOverview?.avg_score ?? '--'}
+                                </span>
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                    高 {alignmentOverview?.distribution?.high ?? 0}
+                                </span>
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                    中 {alignmentOverview?.distribution?.medium ?? 0}
+                                </span>
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                    低 {alignmentOverview?.distribution?.low ?? 0}
+                                </span>
+                            </div>
+                        </div>
+                        <div style={{ marginTop: '0.6rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                            {weeklyAlignmentTrend?.summary || '暂无周对齐趋势数据'}
+                        </div>
+                        {anchorEffect?.available && (
+                            <div
+                                style={{
+                                    marginTop: '0.6rem',
+                                    border: '1px solid rgba(59, 130, 246, 0.35)',
+                                    background: 'rgba(59, 130, 246, 0.12)',
+                                    borderRadius: '8px',
+                                    padding: '0.55rem 0.65rem',
+                                    fontSize: '0.78rem',
+                                    color: '#bfdbfe'
+                                }}
+                            >
+                                <div>
+                                    最近一次生效: 影响 {anchorEffect.affected_count ?? 0}/{anchorEffect.total_processed ?? 0} 个目标，平均分变化 {effectDeltaLabel}
+                                </div>
+                                {anchorEffect.anchor_version && (
+                                    <div style={{ marginTop: '0.2rem', color: 'var(--text-secondary)' }}>
+                                        Anchor 版本: {anchorEffect.anchor_version}
+                                        {anchorEffect.generated_at ? ` · ${anchorEffect.generated_at}` : ''}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                        <div style={{ marginTop: '0.7rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                            <button
+                                type="button"
+                                className="btn btn-secondary"
+                                onClick={handleCheckAnchorDiff}
+                                disabled={anchorDiffLoading}
+                                style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
+                            >
+                                {anchorDiffLoading ? '检查中...' : '检查 Anchor 变更'}
+                            </button>
+                            {canActivateAnchor && (
+                                <button
+                                    type="button"
+                                    className="btn btn-primary"
+                                    onClick={() => setActivateAnchorModalOpen(true)}
+                                    disabled={activateAnchorLoading}
+                                    style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
+                                >
+                                    激活新 Anchor
+                                </button>
+                            )}
+                        </div>
+                        {anchorDiff?.diff && (
+                            <div style={{ marginTop: '0.65rem', fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                                <div>
+                                    变更状态: {anchorDiff.diff.status}
+                                    {anchorDiff.diff.version_change ? ` (${anchorDiff.diff.version_change})` : ''}
+                                </div>
+                                {(anchorDiff.diff.added_commitments?.length > 0 || anchorDiff.diff.removed_commitments?.length > 0) && (
+                                    <div style={{ marginTop: '0.25rem' }}>
+                                        承诺变化: +{anchorDiff.diff.added_commitments?.length || 0} / -{anchorDiff.diff.removed_commitments?.length || 0}
+                                    </div>
+                                )}
+                                {(anchorDiff.diff.added_anti_values?.length > 0 || anchorDiff.diff.removed_anti_values?.length > 0) && (
+                                    <div style={{ marginTop: '0.15rem' }}>
+                                        反价值变化: +{anchorDiff.diff.added_anti_values?.length || 0} / -{anchorDiff.diff.removed_anti_values?.length || 0}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
 
-                                {/* 里程碑 */}
-                                {vision.children?.filter(m => m.horizon === 'milestone').length > 0 && (
-                                    <div style={{ marginLeft: '1rem', borderLeft: '2px solid rgba(139, 92, 246, 0.3)', paddingLeft: '1rem' }}>
-                                        {vision.children.filter(m => m.horizon === 'milestone').map(milestone => (
-                                            <div key={milestone.id} style={{ marginBottom: '1rem' }}>
-                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                                                    <div>
-                                                        <span style={{ color: '#8b5cf6', fontSize: '0.65rem', fontWeight: 600 }}>🏔️ 里程碑</span>
-                                                        <h5 style={{ margin: '0.2rem 0', fontSize: '0.9375rem' }}>{milestone.title}</h5>
-                                                    </div>
-                                                    <Link to={`/goals/${milestone.id}/decompose`} className="btn btn-secondary" style={{ fontSize: '0.7rem', padding: '0.2rem 0.5rem' }}>
-                                                        分解
-                                                    </Link>
-                                                </div>
+                    {goalTree.length > 0 ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                            {goalTree.filter((v) => v.layer === 'vision').map((vision) => (
+                                <div key={vision.id} className="glass-card" style={{ padding: '1rem', borderLeft: '4px solid #f59e0b' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.75rem' }}>
+                                        <div>
+                                            <div style={{ color: '#f59e0b', fontSize: '0.75rem' }}>愿景</div>
+                                            <h5 style={{ margin: '0.25rem 0 0 0' }}>{vision.title}</h5>
+                                        </div>
+                                        <Link to={`/goals/${vision.id}/decompose`} className="btn btn-secondary" style={{ fontSize: '0.75rem' }}>
+                                            + 分解
+                                        </Link>
+                                    </div>
 
-                                                {/* 目标 */}
-                                                {milestone.children?.filter(g => g.horizon === 'goal').length > 0 && (
-                                                    <div style={{ marginLeft: '1rem', marginTop: '0.5rem', display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                                                        {milestone.children.filter(g => g.horizon === 'goal').map(goal => {
-                                                            const progress = getGoalProgress(goal.id);
-                                                            const pct = progress.total > 0 ? Math.round(progress.completed / progress.total * 100) : 0;
-                                                            return (
-                                                                <div key={goal.id} style={{
-                                                                    background: 'rgba(16, 185, 129, 0.1)',
-                                                                    border: '1px solid rgba(16, 185, 129, 0.3)',
-                                                                    borderRadius: '6px',
-                                                                    padding: '0.5rem 0.75rem',
-                                                                    fontSize: '0.8rem',
-                                                                    display: 'flex',
-                                                                    alignItems: 'center'
-                                                                }}>
-                                                                    <span style={{ color: '#10b981', marginRight: '4px' }}>🎯</span>
-                                                                    <span style={{ marginRight: '0.5rem' }}>{goal.title}</span>
-                                                                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.7rem', flex: 1 }}>{pct}%</span>
-                                                                    <button
-                                                                        onClick={(e) => handleDeleteGoal(goal.id, e)}
+                                    {(vision.children || []).length > 0 && (
+                                        <div style={{ marginTop: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                                            {vision.children.map((child) => {
+                                                const progress = getGoalProgress(child.id);
+                                                const pct = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+                                                const alignmentLevel = String(child.alignment_level || 'unknown').toLowerCase();
+                                                const alignmentStyle = alignmentLevelStyleMap[alignmentLevel] || alignmentLevelStyleMap.unknown;
+                                                return (
+                                                    <div key={child.id} style={{
+                                                        background: 'rgba(255,255,255,0.03)',
+                                                        border: '1px solid var(--glass-border)',
+                                                        borderRadius: '8px',
+                                                        padding: '0.6rem 0.75rem'
+                                                    }}>
+                                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem' }}>
+                                                            <div>
+                                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{child.layer}</div>
+                                                                <div>{child.title}</div>
+                                                                <div style={{ marginTop: '0.25rem' }}>
+                                                                    <span
                                                                         style={{
-                                                                            border: 'none',
-                                                                            background: 'none',
-                                                                            color: 'rgba(239, 68, 68, 0.5)',
-                                                                            cursor: 'pointer',
-                                                                            padding: '0 0 0 0.5rem',
-                                                                            fontSize: '1rem',
-                                                                            lineHeight: 0.8
+                                                                            ...alignmentStyle,
+                                                                            fontSize: '0.7rem',
+                                                                            borderRadius: '999px',
+                                                                            padding: '0.12rem 0.4rem',
+                                                                            fontWeight: 600
                                                                         }}
-                                                                        title="删除"
-                                                                    >×</button>
+                                                                    >
+                                                                        {formatAlignmentLevel(alignmentLevel)} {Number.isFinite(child.alignment_score) ? `· ${child.alignment_score}` : ''}
+                                                                    </span>
                                                                 </div>
-                                                            );
-                                                        })}
+                                                            </div>
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{pct}%</span>
+                                                                <button
+                                                                    onClick={(e) => askDeleteGoal(child.id, e)}
+                                                                    style={{ border: 'none', background: 'none', color: 'rgba(239, 68, 68, 0.6)', cursor: 'pointer', fontSize: '1rem' }}
+                                                                    title="删除"
+                                                                >
+                                                                    ×
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
+                        <div className="glass-card" style={{ padding: '1rem' }}>
+                            暂无愿景。<Link to="/vision/new">创建愿景</Link>
+                        </div>
+                    )}
+
+                    {standaloneGoals.length > 0 && (
+                        <div style={{ marginTop: '1rem' }}>
+                            <h5 style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>独立目标</h5>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '0.75rem' }}>
+                                {standaloneGoals.map((goal) => {
+                                    const progress = getGoalProgress(goal.id);
+                                    const pct = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+                                    const alignmentLevel = String(goal.alignment_level || 'unknown').toLowerCase();
+                                    const alignmentStyle = alignmentLevelStyleMap[alignmentLevel] || alignmentLevelStyleMap.unknown;
+                                    return (
+                                        <div key={goal.id} className="glass-card" style={{ padding: '0.8rem' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                <div style={{ fontSize: '0.9rem' }}>{goal.title}</div>
+                                                <button
+                                                    onClick={(e) => askDeleteGoal(goal.id, e)}
+                                                    style={{ border: 'none', background: 'none', color: 'rgba(239, 68, 68, 0.6)', cursor: 'pointer' }}
+                                                    title="删除"
+                                                >
+                                                    ×
+                                                </button>
+                                            </div>
+                                            <div style={{ marginTop: '0.35rem' }}>
+                                                <span
+                                                    style={{
+                                                        ...alignmentStyle,
+                                                        fontSize: '0.7rem',
+                                                        borderRadius: '999px',
+                                                        padding: '0.12rem 0.4rem',
+                                                        fontWeight: 600
+                                                    }}
+                                                >
+                                                    {formatAlignmentLevel(alignmentLevel)} {Number.isFinite(goal.alignment_score) ? `· ${goal.alignment_score}` : ''}
+                                                </span>
+                                            </div>
+                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{progress.completed}/{progress.total} 任务 · {pct}%</div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+                </section>
+            )}
+
+            {viewMode === 'execute' && (
+                <section>
+                    <h4 style={{ color: 'var(--accent-color)', marginBottom: '0.75rem', fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                        当前任务
+                    </h4>
+                    {pendingRecoveryCount > 0 && (
+                        <div style={{ marginBottom: '0.6rem', display: 'flex', justifyContent: 'flex-end' }}>
+                            <button
+                                type="button"
+                                className="btn btn-secondary"
+                                onClick={handleApplyRecoveryBatch}
+                                disabled={recoveryBatchLoading || actionLoading}
+                                style={{ fontSize: '0.76rem', padding: '0.28rem 0.7rem' }}
+                            >
+                                {recoveryBatchLoading ? '应用中...' : `一键应用恢复批处理 (${pendingRecoveryCount})`}
+                            </button>
+                        </div>
+                    )}
+                    {!currentTask ? (
+                        <div className="glass-card" style={{ padding: '1rem' }}>
+                            今日暂无待办任务。
+                        </div>
+                    ) : (
+                        <div className="glass-card" style={{ padding: '1.25rem' }}>
+                            <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{currentTask.goal_title}</div>
+                            <h3 style={{ marginTop: '0.25rem' }}>{currentTask.description}</h3>
+                            <div style={{ display: 'flex', gap: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1rem' }}>
+                                <span>{currentTask.estimated_minutes} 分钟</span>
+                                <span>{currentTask.scheduled_date} {currentTask.scheduled_time !== 'Anytime' ? currentTask.scheduled_time : ''}</span>
+                            </div>
+                            <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                <button onClick={handleComplete} className="btn btn-primary" disabled={actionLoading}>
+                                    {actionLoading ? '处理中...' : '完成任务'}
+                                </button>
+                                <button onClick={openSkipDialog} className="btn btn-secondary" disabled={actionLoading}>
+                                    跳过
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </section>
+            )}
+
+            {retrospective && (
+                <section style={{ marginTop: '2rem' }}>
+                    <h4 style={{ color: 'var(--accent-color)', marginBottom: '0.75rem', fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                        Guardian 复盘
+                    </h4>
+                    <div className="glass-card" style={{ padding: '1rem' }}>
+                        <p style={{ margin: '0 0 0.75rem 0', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                            最近 {retrospective.period?.days ?? 7} 天 · {retrospective.period?.start_date ?? ''} 至 {retrospective.period?.end_date ?? ''}
+                        </p>
+                        <p style={{ margin: '0 0 0.75rem 0' }}>
+                            {retrospective.observations?.[0] ?? retrospective.rhythm?.summary ?? '本周期暂无总结'}
+                        </p>
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Authority 升级级别</div>
+                                <div style={{ fontSize: '0.86rem', fontWeight: 600 }}>{guardianEscalationLabel}</div>
+                            </div>
+                            <div style={{ marginTop: '0.25rem', fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
+                                窗口 {guardianEscalation.window_days ?? 7} 天 · 抵抗 {guardianEscalation.resistance_count ?? 0}
+                                / 响应 {guardianEscalation.response_count ?? 0}
+                            </div>
+                        </div>
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: interventionSuppressed
+                                    ? '1px solid rgba(245, 158, 11, 0.45)'
+                                    : '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: interventionSuppressed
+                                    ? 'rgba(245, 158, 11, 0.1)'
+                                    : 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>干预节奏策略</div>
+                                <div style={{ fontSize: '0.86rem', fontWeight: 600 }}>{interventionPolicyLabel}</div>
+                            </div>
+                            <div style={{ marginTop: '0.25rem', fontSize: '0.73rem', color: 'var(--text-secondary)' }}>
+                                原因: {interventionPolicy?.reason || '暂无策略说明'}
+                            </div>
+                            <div style={{ marginTop: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                提醒预算: {reminderWindowLabel} · 冷却: {interventionCooldownLabel}
+                            </div>
+                        {interventionSuppressed && (
+                            <div style={{ marginTop: '0.2rem', fontSize: '0.72rem', color: '#fcd34d' }}>
+                                当前轮次触发了摩擦预算，建议已暂缓展示。
+                            </div>
+                        )}
+                    </div>
+                    <div
+                        style={{
+                            marginBottom: '0.75rem',
+                            border: trustRepairActive
+                                ? '1px solid rgba(34, 197, 94, 0.45)'
+                                : '1px solid rgba(148, 163, 184, 0.3)',
+                            borderRadius: '8px',
+                            padding: '0.65rem 0.75rem',
+                            background: trustRepairActive
+                                ? 'rgba(34, 197, 94, 0.12)'
+                                : 'rgba(148, 163, 184, 0.08)'
+                        }}
+                    >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>信任修复回路</div>
+                            <div style={{ fontSize: '0.84rem', fontWeight: 600 }}>
+                                {trustRepairActive ? '激活中' : '未激活'}
+                            </div>
+                        </div>
+                        <div style={{ marginTop: '0.22rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                            连续负反馈 {trustRepairPolicy?.negative_streak ?? 0}/{trustRepairPolicy?.negative_streak_threshold ?? '--'}
+                            · 窗口 {trustRepairPolicy?.window_hours ?? '--'}h
+                        </div>
+                        <div style={{ marginTop: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                            最近来源: {Array.isArray(trustRepairPolicy?.streak_sources) && trustRepairPolicy.streak_sources.length > 0
+                                ? trustRepairPolicy.streak_sources.join(' / ')
+                                : '无'}
+                        </div>
+                        {trustRepairMinStep && (
+                            <div style={{ marginTop: '0.24rem', fontSize: '0.72rem', color: '#86efac' }}>
+                                最小恢复步骤: {trustRepairMinStep}
+                            </div>
+                        )}
+                    </div>
+                    {guardianSafeMode.enabled && (
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                    border: guardianSafeMode.active
+                                        ? '1px solid rgba(245, 158, 11, 0.45)'
+                                        : '1px solid rgba(148, 163, 184, 0.3)',
+                                    borderRadius: '8px',
+                                    padding: '0.65rem 0.75rem',
+                                    background: guardianSafeMode.active
+                                        ? 'rgba(245, 158, 11, 0.14)'
+                                        : 'rgba(148, 163, 184, 0.08)'
+                                }}
+                            >
+                                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                    <div style={{ fontSize: '0.82rem', fontWeight: 600 }}>
+                                        Safe Mode {guardianSafeMode.active ? '已开启' : '未开启'}
+                                    </div>
+                                    {guardianSafeMode.entered_at && (
+                                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            {guardianSafeMode.active ? '进入于' : '最近结束于'} {guardianSafeMode.active ? guardianSafeMode.entered_at : (guardianSafeMode.exited_at || guardianSafeMode.entered_at)}
+                                        </div>
+                                    )}
+                                </div>
+                                {guardianSafeMode.reason && (
+                                    <div style={{ marginTop: '0.25rem', fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
+                                        原因: {guardianSafeMode.reason}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.03)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>L2 保护率</div>
+                                <div style={{ fontSize: '0.9rem', fontWeight: 700, color: l2ProtectionColorMap[l2ProtectionLevel] || l2ProtectionColorMap.unknown }}>
+                                    {l2ProtectionLabel}
+                                </div>
+                            </div>
+                            <div style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                {retrospective.l2_protection?.summary || '暂无 L2 保护数据'}
+                            </div>
+                            <div style={{ marginTop: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                完成 {retrospective.l2_protection?.protected ?? 0} · 中断 {retrospective.l2_protection?.interrupted ?? 0}
+                            </div>
+                            {l2ThresholdLabel && (
+                                <div style={{ marginTop: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    {l2ThresholdLabel}
+                                </div>
+                            )}
+                            {l2TrendPoints.length > 0 && (
+                                <div style={{ marginTop: '0.5rem', display: 'grid', gap: '0.25rem' }}>
+                                    {l2TrendPoints.map((point) => {
+                                        const ratio = Number(point?.ratio);
+                                        const ratioPct = Number.isFinite(ratio) ? Math.round(ratio * 100) : null;
+                                        const barWidth = ratioPct !== null ? `${Math.max(0, Math.min(100, ratioPct))}%` : '0%';
+                                        return (
+                                            <div
+                                                key={point.date}
+                                                style={{
+                                                    display: 'grid',
+                                                    gridTemplateColumns: '52px 1fr 44px',
+                                                    gap: '0.35rem',
+                                                    alignItems: 'center'
+                                                }}
+                                            >
+                                                <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                                    {(point.date || '').slice(5)}
+                                                </span>
+                                                <div
+                                                    style={{
+                                                        height: '6px',
+                                                        borderRadius: '999px',
+                                                        background: 'rgba(255,255,255,0.12)',
+                                                        overflow: 'hidden'
+                                                    }}
+                                                >
+                                                    <div
+                                                        style={{
+                                                            width: barWidth,
+                                                            height: '100%',
+                                                            background: ratioPct === null
+                                                                ? 'rgba(148, 163, 184, 0.4)'
+                                                                : 'rgba(34, 197, 94, 0.8)'
+                                                        }}
+                                                    />
+                                                </div>
+                                                <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', textAlign: 'right' }}>
+                                                    {ratioPct === null ? '--' : `${ratioPct}%`}
+                                                </span>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Iteration 8 信任校准指标</div>
+                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    感知控制 · 打断负担 · 恢复时长 · 自动化节省
+                                </div>
+                            </div>
+                            <div style={{ marginTop: '0.5rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.5rem' }}>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>感知控制分数</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{perceivedControlLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        状态: {perceivedControlMetric?.status || 'unknown'}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {perceivedControlMetric?.reason || `支持占比 ${Math.round(Number(perceivedControlMetric?.support_ratio || 0) * 100)}%`}
+                                    </div>
+                                </div>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>高压打断负担</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{interruptionBurdenLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        {interruptionBurdenMetric?.high_intensity_count ?? 0}/{interruptionBurdenMetric?.total_interventions ?? 0}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {interruptionBurdenMetric?.reason || '值越低越好'}
+                                    </div>
+                                </div>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>中断恢复中位时长</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{recoveryToResumeLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        样本: {recoveryToResumeMetric?.samples ?? 0}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {recoveryToResumeMetric?.reason || '值越低越好'}
+                                    </div>
+                                </div>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>日常事务节省时长</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{mundaneSavedLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        采纳 {mundaneSavedMetric?.adopted ?? 0}/{mundaneSavedMetric?.suggested ?? 0}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {mundaneSavedMetric?.reason || `按每次 ${mundaneSavedMetric?.estimated_minutes_per_recovery ?? 15} 分钟估算`}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>人性化指标</div>
+                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    恢复采纳 · 摩擦负荷 · 支持/覆盖
+                                </div>
+                            </div>
+                            <div style={{ marginTop: '0.5rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.5rem' }}>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>恢复采纳率</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{recoveryAdoptionLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        {recoveryAdoptionMetric?.adopted ?? 0}/{recoveryAdoptionMetric?.suggested ?? 0} 已采纳
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {recoveryAdoptionMetric?.summary || '暂无恢复建议数据'}
+                                    </div>
+                                </div>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>摩擦负荷</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700, color: frictionLoadColorMap[frictionLoadLevel] || frictionLoadColorMap.unknown }}>
+                                        {frictionLoadLabel}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        级别: {frictionLoadLevel}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {frictionLoadMetric?.summary || '暂无摩擦负荷数据'}
+                                    </div>
+                                </div>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>支持/覆盖比</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{supportVsOverrideLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        {supportVsOverrideModeLabel} · 支持 {supportVsOverrideMetric?.support_count ?? 0} / 覆盖 {supportVsOverrideMetric?.override_count ?? 0}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {supportVsOverrideMetric?.summary || '暂无支持/覆盖数据'}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>North-Star 指标</div>
+                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>{northStarSummaryLabel}</div>
+                            </div>
+                            <div style={{ marginTop: '0.5rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.5rem' }}>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>L1 自动化覆盖率</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{mundaneCoverageLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        机会 {mundaneCoverageMetric?.l1_recovery_opportunities ?? 0} · 采纳 {mundaneCoverageMetric?.adopted_auto_recovery ?? 0}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {metricStatusLabel(mundaneCoverageMetric?.met_target)}
+                                    </div>
+                                </div>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>L2 Bloom 时长</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{l2BloomHoursLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        基线 {Number.isFinite(l2BloomBaseline) ? `${l2BloomBaseline.toFixed(1)}h` : '--'} · 变化 {l2BloomDeltaLabel}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {metricStatusLabel(l2BloomMetric?.met_target)}
+                                    </div>
+                                </div>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>Human Trust Index</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{humanTrustLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        支持 {Number.isFinite(Number(humanTrustMetric?.components?.support_ratio)) ? `${Math.round(Number(humanTrustMetric?.components?.support_ratio) * 100)}%` : '--'} · 采纳 {Number.isFinite(Number(humanTrustMetric?.components?.adoption_rate)) ? `${Math.round(Number(humanTrustMetric?.components?.adoption_rate) * 100)}%` : '--'}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {metricStatusLabel(humanTrustMetric?.met_target)}
+                                    </div>
+                                </div>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>周对齐增量</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{alignmentDeltaLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        本周 {alignmentDeltaMetric?.current_week_avg ?? '--'} · 上周 {alignmentDeltaMetric?.previous_week_avg ?? '--'}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {metricStatusLabel(alignmentDeltaMetric?.met_target)}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>L2 会话状态</div>
+                                <div style={{ fontSize: '0.84rem', fontWeight: 600 }}>
+                                    {l2SessionActive ? `进行中 · ${l2SessionActiveId || '--'}` : '未进行'}
+                                </div>
+                            </div>
+                            <div style={{ marginTop: '0.22rem', fontSize: '0.73rem', color: 'var(--text-secondary)' }}>
+                                启动 {l2Session.started ?? 0} · 完成 {l2Session.completed ?? 0}
+                                · 中断 {l2Session.interrupted ?? 0} · 恢复 {l2Session.resumed ?? 0}
+                                · 完结率 {l2SessionCompletionLabel} · 恢复率 {l2SessionRecoveryLabel}
+                            </div>
+                            <div style={{ marginTop: '0.22rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                开始意图采纳 {l2StartIntentionRateLabel} · 完成反馈采纳 {l2CompletionReflectionRateLabel}
+                            </div>
+                            <div style={{ marginTop: '0.48rem', display: 'grid', gap: '0.45rem' }}>
+                                <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                                    <input
+                                        type="text"
+                                        value={l2StartIntention}
+                                        onChange={(e) => setL2StartIntention(e.target.value)}
+                                        placeholder={l2SessionAction?.ritual?.start_intention_prompt || '开始前写一句本次会话意图'}
+                                        disabled={l2SessionActionLoading || l2SessionActive}
+                                        style={{
+                                            minWidth: '260px',
+                                            flex: '1 1 260px',
+                                            borderRadius: '6px',
+                                            border: '1px solid rgba(255,255,255,0.2)',
+                                            background: 'rgba(0,0,0,0.25)',
+                                            color: 'white',
+                                            padding: '0.25rem 0.4rem',
+                                            fontSize: '0.74rem'
+                                        }}
+                                    />
+                                    <button
+                                        type="button"
+                                        className="btn btn-primary"
+                                        onClick={() => handleL2SessionAction('start')}
+                                        disabled={l2SessionActionLoading || l2SessionActive}
+                                        style={{ fontSize: '0.76rem', padding: '0.25rem 0.7rem' }}
+                                    >
+                                        {l2SessionActionLoading ? '处理中...' : '开始 L2 会话'}
+                                    </button>
+                                </div>
+                                {(l2SessionResumeReady || l2SessionResumeHint) && (
+                                    <div style={{ display: 'grid', gap: '0.3rem' }}>
+                                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            {l2SessionResumeId ? `可恢复会话: ${l2SessionResumeId}` : '检测到可恢复会话'}
+                                            {l2Session?.resume_reason_label ? ` · 原因 ${l2Session.resume_reason_label}` : ''}
+                                        </div>
+                                        <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                                            <input
+                                                type="text"
+                                                value={l2ResumeStep}
+                                                onChange={(e) => setL2ResumeStep(e.target.value)}
+                                                placeholder={l2SessionResumeHint || '写下恢复后的最小回归步骤'}
+                                                disabled={l2SessionActionLoading || !l2SessionResumeReady}
+                                                style={{
+                                                    minWidth: '260px',
+                                                    flex: '1 1 260px',
+                                                    borderRadius: '6px',
+                                                    border: '1px solid rgba(255,255,255,0.2)',
+                                                    background: 'rgba(0,0,0,0.25)',
+                                                    color: 'white',
+                                                    padding: '0.25rem 0.4rem',
+                                                    fontSize: '0.74rem'
+                                                }}
+                                            />
+                                            <button
+                                                type="button"
+                                                className="btn btn-secondary"
+                                                onClick={() => handleL2SessionAction('resume')}
+                                                disabled={l2SessionActionLoading || !l2SessionResumeReady}
+                                                style={{ fontSize: '0.76rem', padding: '0.25rem 0.65rem' }}
+                                            >
+                                                恢复会话
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+                                <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                                    <input
+                                        type="text"
+                                        value={l2CompletionReflection}
+                                        onChange={(e) => setL2CompletionReflection(e.target.value)}
+                                        placeholder={l2SessionAction?.ritual?.complete_reflection_prompt || '完成后写一句反馈'}
+                                        disabled={l2SessionActionLoading || !l2SessionActive}
+                                        style={{
+                                            minWidth: '220px',
+                                            flex: '1 1 220px',
+                                            borderRadius: '6px',
+                                            border: '1px solid rgba(255,255,255,0.2)',
+                                            background: 'rgba(0,0,0,0.25)',
+                                            color: 'white',
+                                            padding: '0.25rem 0.4rem',
+                                            fontSize: '0.74rem'
+                                        }}
+                                    />
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={() => handleL2SessionAction('complete')}
+                                        disabled={l2SessionActionLoading || !l2SessionActive}
+                                        style={{ fontSize: '0.76rem', padding: '0.25rem 0.65rem' }}
+                                    >
+                                        完成会话
+                                    </button>
+                                    <select
+                                        value={l2InterruptReason}
+                                        onChange={(e) => setL2InterruptReason(e.target.value)}
+                                        disabled={l2SessionActionLoading || !l2SessionActive}
+                                        style={{
+                                            borderRadius: '6px',
+                                            border: '1px solid rgba(255,255,255,0.2)',
+                                            background: 'rgba(0,0,0,0.25)',
+                                            color: 'white',
+                                            padding: '0.25rem 0.35rem',
+                                            fontSize: '0.74rem'
+                                        }}
+                                    >
+                                        {l2InterruptReasonOptions.map((opt) => (
+                                            <option key={`l2_reason_${opt.value}`} value={opt.value}>
+                                                {opt.label || l2InterruptReasonLabelMap[opt.value] || opt.value}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={() => handleL2SessionAction('interrupt')}
+                                        disabled={l2SessionActionLoading || !l2SessionActive}
+                                        style={{ fontSize: '0.76rem', padding: '0.25rem 0.65rem' }}
+                                    >
+                                        记录中断
+                                    </button>
+                                </div>
+                            </div>
+                            {l2Session.latest && (
+                                <div style={{ marginTop: '0.35rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    最近会话事件: {l2Session.latest.type || '--'}
+                                    {l2Session.latest.reason_label ? ` · ${l2Session.latest.reason_label}` : ''}
+                                    {l2Session.latest.timestamp ? ` · ${l2Session.latest.timestamp}` : ''}
+                                </div>
+                            )}
+                            {l2SessionRecentEvents.length > 0 && (
+                                <div style={{ marginTop: '0.4rem', display: 'grid', gap: '0.28rem' }}>
+                                    {l2SessionRecentEvents.map((ev, idx) => (
+                                        <div
+                                            key={`l2_evt_${idx}`}
+                                            style={{
+                                                fontSize: '0.71rem',
+                                                color: 'var(--text-secondary)',
+                                                background: 'rgba(0,0,0,0.2)',
+                                                borderRadius: '6px',
+                                                padding: '0.28rem 0.42rem'
+                                            }}
+                                        >
+                                            [{ev.type || 'unknown'}] {ev.detail || '--'}
+                                            {ev.timestamp ? ` · ${ev.timestamp}` : ''}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Blueprint Narrative Loop</div>
+                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    {blueprintNarrativeCard?.title || 'How This Week Served Long-Term Value'}
+                                </div>
+                            </div>
+                            <div style={{ marginTop: '0.22rem', fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
+                                {blueprintNarrativeCard?.summary || '暂无叙事摘要'}
+                            </div>
+                            {blueprintNarrativeCard?.alignment_trend && (
+                                <div style={{ marginTop: '0.22rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    对齐趋势: {blueprintNarrativeCard.alignment_trend}
+                                </div>
+                            )}
+                            <div style={{ marginTop: '0.45rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.4rem' }}>
+                                {['wisdom', 'experience', 'connection'].map((key) => {
+                                    const dimension = blueprintDimensions?.[key] || {};
+                                    return (
+                                        <div
+                                            key={`blueprint_dim_${key}`}
+                                            style={{
+                                                border: '1px solid rgba(148,163,184,0.25)',
+                                                borderRadius: '8px',
+                                                padding: '0.4rem 0.45rem',
+                                                background: 'rgba(2, 6, 23, 0.2)'
+                                            }}
+                                        >
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.35rem', alignItems: 'center' }}>
+                                                <div style={{ fontSize: '0.73rem', textTransform: 'capitalize' }}>{key}</div>
+                                                <div style={{ fontSize: '0.68rem', color: dimension?.progress ? '#86efac' : '#fca5a5' }}>
+                                                    {dimension?.progress ? '有进展' : '待加强'}
+                                                </div>
+                                            </div>
+                                            <div style={{ marginTop: '0.18rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                                {dimension?.summary || '--'}
+                                            </div>
+                                            {Array.isArray(dimension?.evidence) && dimension.evidence.length > 0 && (
+                                                <div style={{ marginTop: '0.25rem', display: 'grid', gap: '0.2rem' }}>
+                                                    {dimension.evidence.slice(-2).map((ev, idx) => (
+                                                        <div key={`dim_ev_${key}_${idx}`} style={{ fontSize: '0.67rem', color: 'var(--text-secondary)' }}>
+                                                            [{ev.type || 'event'}] {ev.detail || '--'}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                            <div style={{ marginTop: '0.42rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                下周强化: {blueprintNarrativeCard?.reinforce_behavior || '--'}
+                            </div>
+                            <div style={{ marginTop: '0.18rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                下周减少: {blueprintNarrativeCard?.reduce_behavior || '--'}
+                            </div>
+                        </div>
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Guardian 阈值配置</div>
+                                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={refreshGuardianConfig}
+                                        disabled={guardianConfigLoading || guardianConfigSaving}
+                                        style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                    >
+                                        {guardianConfigLoading ? '刷新中...' : '刷新'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn btn-primary"
+                                        onClick={saveGuardianConfig}
+                                        disabled={!guardianConfigDirty || guardianConfigSaving}
+                                        style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                    >
+                                        {guardianConfigSaving ? '保存中...' : '保存阈值'}
+                                    </button>
+                                </div>
+                            </div>
+                            {guardianConfig ? (
+                                <div style={{ marginTop: '0.5rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.45rem' }}>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        干预级别
+                                        <select
+                                            value={guardianConfig.intervention_level || 'SOFT'}
+                                            onChange={(e) => updateGuardianInterventionLevel(e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        >
+                                            <option value="OBSERVE_ONLY">OBSERVE_ONLY</option>
+                                            <option value="SOFT">SOFT</option>
+                                            <option value="ASK">ASK</option>
+                                        </select>
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        重复跳过阈值
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            value={deviationCfg.repeated_skip ?? 2}
+                                            onChange={(e) => updateGuardianConfigField('deviation_signals', 'repeated_skip', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        L2 中断阈值
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            value={deviationCfg.l2_interruption ?? 1}
+                                            onChange={(e) => updateGuardianConfigField('deviation_signals', 'l2_interruption', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        停滞天数阈值
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            value={deviationCfg.stagnation_days ?? 3}
+                                            onChange={(e) => updateGuardianConfigField('deviation_signals', 'stagnation_days', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        L2 高阈值
+                                        <input
+                                            type="number"
+                                            min="0"
+                                            max="1"
+                                            step="0.01"
+                                            value={l2Cfg.high ?? 0.75}
+                                            onChange={(e) => updateGuardianConfigField('l2_protection', 'high', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        L2 中阈值
+                                        <input
+                                            type="number"
+                                            min="0"
+                                            max="1"
+                                            step="0.01"
+                                            value={l2Cfg.medium ?? 0.5}
+                                            onChange={(e) => updateGuardianConfigField('l2_protection', 'medium', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                </div>
+                            ) : (
+                                <div style={{ marginTop: '0.45rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    当前无法加载配置，点击“刷新”重试。
+                                </div>
+                            )}
+                            {guardianConfigSavedAt && (
+                                <div style={{ marginTop: '0.35rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                    上次保存: {guardianConfigSavedAt}
+                                </div>
+                            )}
+                        </div>
+
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Guardian 边界偏好</div>
+                                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={refreshGuardianBoundariesConfig}
+                                        disabled={guardianBoundariesLoading || guardianBoundariesSaving}
+                                        style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                    >
+                                        {guardianBoundariesLoading ? '刷新中...' : '刷新'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn btn-primary"
+                                        onClick={saveGuardianBoundariesConfig}
+                                        disabled={!guardianBoundariesDirty || guardianBoundariesSaving}
+                                        style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                    >
+                                        {guardianBoundariesSaving ? '保存中...' : '保存边界'}
+                                    </button>
+                                </div>
+                            </div>
+                            {guardianBoundariesConfig ? (
+                                <>
+                                    <div style={{ marginTop: '0.5rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.45rem' }}>
+                                        <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            提醒频率
+                                            <select
+                                                value={effectiveBoundaries?.reminder_frequency || 'balanced'}
+                                                onChange={(e) => updateGuardianBoundariesField('reminder_frequency', e.target.value)}
+                                                style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                            >
+                                                <option value="low">low</option>
+                                                <option value="balanced">balanced</option>
+                                                <option value="high">high</option>
+                                            </select>
+                                        </label>
+                                        <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            提醒通道
+                                            <select
+                                                value={effectiveBoundaries?.reminder_channel || 'in_app'}
+                                                onChange={(e) => updateGuardianBoundariesField('reminder_channel', e.target.value)}
+                                                style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                            >
+                                                <option value="in_app">in_app</option>
+                                                <option value="digest">digest</option>
+                                                <option value="silent">silent</option>
+                                            </select>
+                                        </label>
+                                        <label style={{ display: 'flex', gap: '0.35rem', alignItems: 'center', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            <input
+                                                type="checkbox"
+                                                checked={Boolean(effectiveQuietHours?.enabled)}
+                                                onChange={(e) => updateGuardianBoundariesQuietHoursField('enabled', e.target.checked)}
+                                            />
+                                            启用安静时段
+                                        </label>
+                                        <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            安静开始小时
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                max="23"
+                                                value={effectiveQuietHours?.start_hour ?? 22}
+                                                onChange={(e) => updateGuardianBoundariesQuietHoursField('start_hour', e.target.value)}
+                                                style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                            />
+                                        </label>
+                                        <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            安静结束小时
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                max="23"
+                                                value={effectiveQuietHours?.end_hour ?? 8}
+                                                onChange={(e) => updateGuardianBoundariesQuietHoursField('end_hour', e.target.value)}
+                                                style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                            />
+                                        </label>
+                                        <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            时区
+                                            <input
+                                                type="text"
+                                                value={effectiveQuietHours?.timezone || 'local'}
+                                                onChange={(e) => updateGuardianBoundariesQuietHoursField('timezone', e.target.value)}
+                                                style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                            />
+                                        </label>
+                                    </div>
+                                    <div style={{ marginTop: '0.35rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        当前策略: {boundaryFrequencyLabelMap[boundariesReminderFrequency] || boundariesReminderFrequency}
+                                        · {boundaryChannelLabelMap[boundariesReminderChannel] || boundariesReminderChannel}
+                                        · 安静时段 {effectiveQuietHours?.enabled ? `${effectiveQuietHours?.start_hour ?? '--'}:00-${effectiveQuietHours?.end_hour ?? '--'}:00` : '关闭'}
+                                    </div>
+                                </>
+                            ) : (
+                                <div style={{ marginTop: '0.45rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    当前无法加载边界配置，点击“刷新”重试。
+                                </div>
+                            )}
+                            {guardianBoundariesSavedAt && (
+                                <div style={{ marginTop: '0.35rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                    上次保存: {guardianBoundariesSavedAt}
+                                </div>
+                            )}
+                        </div>
+
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Guardian Autotune 治理</div>
+                                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={refreshGuardianAutotuneState}
+                                        disabled={guardianAutotuneLoading || guardianAutotuneSaving || guardianAutotuneActionLoading}
+                                        style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                    >
+                                        {guardianAutotuneLoading ? '刷新中...' : '刷新'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn btn-primary"
+                                        onClick={saveGuardianAutotuneConfig}
+                                        disabled={!guardianAutotuneDirty || guardianAutotuneSaving}
+                                        style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                    >
+                                        {guardianAutotuneSaving ? '保存中...' : '保存配置'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={runGuardianAutotuneProposal}
+                                        disabled={guardianAutotuneActionLoading}
+                                        style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                    >
+                                        {guardianAutotuneActionLoading ? '执行中...' : '生成提议'}
+                                    </button>
+                                </div>
+                            </div>
+
+                            {guardianAutotuneConfig ? (
+                                <div style={{ marginTop: '0.5rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.45rem' }}>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        模式
+                                        <select
+                                            value={guardianAutotuneMode}
+                                            onChange={(e) => updateGuardianAutotuneRootField('mode', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        >
+                                            <option value="shadow">shadow</option>
+                                            <option value="assist">assist</option>
+                                        </select>
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        Lookback 天数
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            max="30"
+                                            value={guardianAutotuneTriggerCfg.lookback_days ?? 7}
+                                            onChange={(e) => updateGuardianAutotuneNestedField('trigger', 'lookback_days', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        最小事件量
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            value={guardianAutotuneTriggerCfg.min_event_count ?? 20}
+                                            onChange={(e) => updateGuardianAutotuneNestedField('trigger', 'min_event_count', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        冷却小时
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            value={guardianAutotuneTriggerCfg.cooldown_hours ?? 24}
+                                            onChange={(e) => updateGuardianAutotuneNestedField('trigger', 'cooldown_hours', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        最低置信度
+                                        <input
+                                            type="number"
+                                            min="0"
+                                            max="1"
+                                            step="0.01"
+                                            value={guardianAutotuneGuardrailsCfg.min_confidence ?? 0.55}
+                                            onChange={(e) => updateGuardianAutotuneNestedField('guardrails', 'min_confidence', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        评估窗口(小时)
+                                        <input
+                                            type="number"
+                                            min="6"
+                                            max="168"
+                                            value={guardianAutotuneAutoEvalCfg.horizon_hours ?? 48}
+                                            onChange={(e) => updateGuardianAutotuneNestedField('auto_evaluate', 'horizon_hours', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        评估回看天数
+                                        <input
+                                            type="number"
+                                            min="7"
+                                            max="365"
+                                            value={guardianAutotuneAutoEvalCfg.lookback_days ?? 90}
+                                            onChange={(e) => updateGuardianAutotuneNestedField('auto_evaluate', 'lookback_days', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        每轮最大评估数
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            max="20"
+                                            value={guardianAutotuneAutoEvalCfg.max_targets_per_cycle ?? 3}
+                                            onChange={(e) => updateGuardianAutotuneNestedField('auto_evaluate', 'max_targets_per_cycle', e.target.value)}
+                                            style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                        />
+                                    </label>
+                                    <label style={{ display: 'flex', gap: '0.35rem', alignItems: 'center', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={Boolean(guardianAutotuneConfig.enabled)}
+                                            onChange={(e) => updateGuardianAutotuneRootField('enabled', e.target.checked)}
+                                        />
+                                        启用自动调参
+                                    </label>
+                                    <label style={{ display: 'flex', gap: '0.35rem', alignItems: 'center', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={Boolean(guardianAutotuneConfig.llm_enabled)}
+                                            onChange={(e) => updateGuardianAutotuneRootField('llm_enabled', e.target.checked)}
+                                        />
+                                        启用 LLM 候选
+                                    </label>
+                                    <label style={{ display: 'flex', gap: '0.35rem', alignItems: 'center', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={Boolean(guardianAutotuneAutoEvalCfg.enabled ?? true)}
+                                            onChange={(e) => updateGuardianAutotuneNestedField('auto_evaluate', 'enabled', e.target.checked)}
+                                        />
+                                        启用自动评估
+                                    </label>
+                                </div>
+                            ) : (
+                                <div style={{ marginTop: '0.45rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    当前无法加载 Autotune 配置，点击“刷新”重试。
+                                </div>
+                            )}
+
+                            {guardianAutotuneSavedAt && (
+                                <div style={{ marginTop: '0.35rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                    上次保存: {guardianAutotuneSavedAt}
+                                </div>
+                            )}
+
+                            <div style={{ marginTop: '0.55rem', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.5rem' }}>
+                                <div style={{ fontSize: '0.75rem', fontWeight: 600 }}>
+                                    运营指标（近 {guardianAutotuneOpsMetrics?.window_days || 14} 天）
+                                </div>
+                                <div style={{ marginTop: '0.35rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.35rem' }}>
+                                    <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '0.35rem 0.4rem', background: 'rgba(255,255,255,0.03)' }}>
+                                        <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>审阅中位耗时</div>
+                                        <div style={{ marginTop: '0.1rem', fontSize: '0.8rem' }}>{reviewMedianLabel}</div>
+                                    </div>
+                                    <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '0.35rem 0.4rem', background: 'rgba(255,255,255,0.03)' }}>
+                                        <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>48h 应用成功率</div>
+                                        <div style={{ marginTop: '0.1rem', fontSize: '0.8rem' }}>{applySuccessLabel}</div>
+                                    </div>
+                                    <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '0.35rem 0.4rem', background: 'rgba(255,255,255,0.03)' }}>
+                                        <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>回滚率</div>
+                                        <div style={{ marginTop: '0.1rem', fontSize: '0.8rem' }}>{rollbackRateLabel}</div>
+                                    </div>
+                                    <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '0.35rem 0.4rem', background: 'rgba(255,255,255,0.03)' }}>
+                                        <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>48h 信任变化</div>
+                                        <div style={{ marginTop: '0.1rem', fontSize: '0.8rem' }}>{trustDeltaLabel}</div>
+                                    </div>
+                                </div>
+                                <div style={{ marginTop: '0.25rem', fontSize: '0.68rem', color: 'var(--text-secondary)' }}>
+                                    trust 状态: {trustDeltaMetric?.status || 'unavailable'} · pending {trustDeltaMetric?.pending ?? 0} · unavailable {trustDeltaMetric?.unavailable ?? 0}
+                                </div>
+                            </div>
+
+                            <div style={{ marginTop: '0.55rem', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.5rem' }}>
+                                <div style={{ fontSize: '0.75rem', fontWeight: 600 }}>近期生命周期链路</div>
+                                {guardianAutotuneHistoryItems.length > 0 ? (
+                                    <div style={{ marginTop: '0.3rem', display: 'grid', gap: '0.28rem' }}>
+                                        {guardianAutotuneHistoryItems.slice(0, 5).map((item) => (
+                                            <div
+                                                key={`autotune_history_${item.proposal_id || item.fingerprint}`}
+                                                style={{
+                                                    border: '1px solid rgba(255,255,255,0.1)',
+                                                    borderRadius: '6px',
+                                                    padding: '0.35rem 0.45rem',
+                                                    background: 'rgba(255,255,255,0.02)'
+                                                }}
+                                            >
+                                                <div style={{ fontSize: '0.72rem' }}>
+                                                    {item.proposal_id || '--'} · {autotuneStatusLabelMap[item.status] || item.status || '--'}
+                                                </div>
+                                                <div style={{ marginTop: '0.15rem', fontSize: '0.68rem', color: 'var(--text-secondary)' }}>
+                                                    latest: {item.latest_timestamp || '--'}
+                                                    {typeof item.review_turnaround_hours === 'number'
+                                                        ? ` · review ${item.review_turnaround_hours.toFixed(2)}h`
+                                                        : ''}
+                                                </div>
+                                                {item.apply_evaluation && (
+                                                    <div style={{ marginTop: '0.12rem', fontSize: '0.68rem', color: 'var(--text-secondary)' }}>
+                                                        apply_48h: {item.apply_evaluation.status || '--'}
                                                     </div>
                                                 )}
                                             </div>
                                         ))}
                                     </div>
+                                ) : (
+                                    <div style={{ marginTop: '0.25rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        暂无生命周期历史数据。
+                                    </div>
                                 )}
+                            </div>
 
-                                {/* 直接挂在愿景下的目标（无里程碑） */}
-                                {vision.children?.filter(g => g.horizon === 'goal').length > 0 && (
-                                    <div style={{ marginLeft: '1rem', marginTop: '0.5rem', display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                                        {vision.children.filter(g => g.horizon === 'goal').map(goal => {
-                                            const progress = getGoalProgress(goal.id);
-                                            const pct = progress.total > 0 ? Math.round(progress.completed / progress.total * 100) : 0;
+                            <div style={{ marginTop: '0.55rem', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.5rem' }}>
+                                <div style={{ fontSize: '0.75rem', fontWeight: 600 }}>最近自动评估运行（cycle）</div>
+                                {guardianAutotuneEvalLogItems.length > 0 ? (
+                                    <div style={{ marginTop: '0.3rem', display: 'grid', gap: '0.28rem' }}>
+                                        {guardianAutotuneEvalLogItems.slice(0, 5).map((item, idx) => {
+                                            const logKey = getAutotuneEvalLogKey(item, idx);
+                                            const expanded = Boolean(guardianAutotuneExpandedLogMap?.[logKey]);
+                                            const logErrors = Array.isArray(item?.errors) ? item.errors : [];
+                                            const retryableCount = logErrors.filter((err) => {
+                                                const proposalId = String(err?.proposal_id || '').trim();
+                                                const fingerprint = String(err?.fingerprint || '').trim();
+                                                return proposalId && fingerprint;
+                                            }).length;
                                             return (
-                                                <div key={goal.id} style={{
-                                                    background: 'rgba(16, 185, 129, 0.1)',
-                                                    border: '1px solid rgba(16, 185, 129, 0.3)',
-                                                    borderRadius: '6px',
-                                                    padding: '0.5rem 0.75rem',
-                                                    fontSize: '0.8rem'
-                                                }}>
-                                                    <span style={{ color: '#10b981' }}>🎯</span> {goal.title}
-                                                    <span style={{ color: 'var(--text-secondary)', marginLeft: '0.5rem', fontSize: '0.7rem' }}>{pct}%</span>
+                                                <div
+                                                    key={`autotune_eval_log_${item.timestamp || idx}`}
+                                                    style={{
+                                                        border: '1px solid rgba(255,255,255,0.1)',
+                                                        borderRadius: '6px',
+                                                        padding: '0.35rem 0.45rem',
+                                                        background: 'rgba(255,255,255,0.02)'
+                                                    }}
+                                                >
+                                                    <div style={{ fontSize: '0.72rem' }}>
+                                                        {item.timestamp || '--'} · status={item.status || '--'} · evaluated={item.evaluated_count ?? 0}
+                                                    </div>
+                                                    <div style={{ marginTop: '0.15rem', fontSize: '0.68rem', color: 'var(--text-secondary)' }}>
+                                                        reason={item.reason || '--'} · targets={item.target_count ?? 0} · errors={item.error_count ?? 0}
+                                                    </div>
+                                                    {logErrors.length > 0 && (
+                                                        <div style={{ marginTop: '0.25rem', display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                                            <button
+                                                                type="button"
+                                                                className="btn btn-secondary"
+                                                                onClick={() => toggleGuardianAutotuneEvalLog(logKey)}
+                                                                style={{ fontSize: '0.68rem', padding: '0.16rem 0.5rem' }}
+                                                            >
+                                                                {expanded ? '收起失败详情' : '展开失败详情'}
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                className="btn btn-secondary"
+                                                                onClick={() => retryFailedGuardianAutotuneEvaluate(item, idx)}
+                                                                disabled={
+                                                                    guardianAutotuneActionLoading
+                                                                    || retryableCount === 0
+                                                                }
+                                                                style={{ fontSize: '0.68rem', padding: '0.16rem 0.5rem' }}
+                                                            >
+                                                                {guardianAutotuneRetryLogKey === logKey
+                                                                    ? '重跑中...'
+                                                                    : `重跑失败评估 (${retryableCount})`}
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                    {expanded && logErrors.length > 0 && (
+                                                        <div
+                                                            style={{
+                                                                marginTop: '0.28rem',
+                                                                display: 'grid',
+                                                                gap: '0.16rem',
+                                                                borderTop: '1px dashed rgba(255,255,255,0.15)',
+                                                                paddingTop: '0.25rem'
+                                                            }}
+                                                        >
+                                                            {logErrors.map((err, errIdx) => (
+                                                                <div
+                                                                    key={`autotune_eval_log_err_${logKey}_${errIdx}`}
+                                                                    style={{ fontSize: '0.67rem', color: 'var(--text-secondary)' }}
+                                                                >
+                                                                    #{errIdx + 1}
+                                                                    {' · '}proposal={err?.proposal_id || '--'}
+                                                                    {' · '}fingerprint={err?.fingerprint || '--'}
+                                                                    {' · '}code={err?.status_code ?? '--'}
+                                                                    {' · '}detail={err?.detail || '--'}
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
                                                 </div>
                                             );
                                         })}
                                     </div>
+                                ) : (
+                                    <div style={{ marginTop: '0.25rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        暂无自动评估运行日志。
+                                    </div>
                                 )}
                             </div>
-                        ))}
-                    </div>
-                ) : (
-                    <div className="glass-card empty-state">
-                        暂无愿景。<Link to="/vision/new" className="empty-state-cta">创建愿景，开始规划</Link>
-                    </div>
-                )}
 
-                {/* 独立目标（没有挂在愿景下的） */}
-                {goals.active?.filter(g => !g.parent_id && g.horizon !== 'vision').length > 0 && (
-                    <div style={{ marginTop: '1.5rem' }}>
-                        <h5 style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', marginBottom: '0.75rem' }}>📋 独立目标</h5>
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '0.75rem' }}>
-                            {goals.active.filter(g => !g.parent_id && g.horizon !== 'vision').map(goal => {
-                                const progress = getGoalProgress(goal.id);
-                                const pct = progress.total > 0 ? Math.round(progress.completed / progress.total * 100) : 0;
-                                return (
-                                    <div key={goal.id} className="glass-card" style={{ padding: '1rem', borderLeft: '3px solid #10b981' }}>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                                            <h5 style={{ margin: '0 0 0.5rem 0', fontSize: '0.875rem', paddingRight: '1rem' }}>{goal.title}</h5>
+                            <div style={{ marginTop: '0.55rem', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.5rem' }}>
+                                <div style={{ fontSize: '0.75rem', fontWeight: 600 }}>最新提议</div>
+                                {guardianAutotuneProposal ? (
+                                    <div style={{ marginTop: '0.3rem', display: 'grid', gap: '0.28rem' }}>
+                                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            proposal_id: {guardianAutotuneProposal.proposal_id || '--'} · confidence: {guardianAutotuneProposal.confidence ?? '--'} · source: {guardianAutotuneProposal.candidate_source || '--'}
+                                        </div>
+                                        <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                            fingerprint: {guardianAutotuneProposal.fingerprint || '--'}
+                                        </div>
+                                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            reason: {guardianAutotuneProposal.reason || '--'}
+                                        </div>
+                                        {guardianAutotunePatchItems.length > 0 && (
+                                            <div style={{ display: 'grid', gap: '0.2rem' }}>
+                                                {guardianAutotunePatchItems.map(([key, delta]) => (
+                                                    <div key={`autotune_patch_${key}`} style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                                        {key}: {delta?.from ?? '--'} → {delta?.to ?? '--'}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                        {!guardianAutotuneAssistMode && (
+                                            <div style={{ fontSize: '0.72rem', color: '#fcd34d' }}>
+                                                当前 mode=shadow，仅提议不执行。切换到 assist 后可执行 review/apply/reject/evaluate/rollback。
+                                            </div>
+                                        )}
+                                        <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
                                             <button
-                                                onClick={(e) => handleDeleteGoal(goal.id, e)}
-                                                style={{ border: 'none', background: 'none', color: 'rgba(239, 68, 68, 0.5)', cursor: 'pointer', fontSize: '1.2rem', lineHeight: 0.5 }}
-                                                title="删除"
-                                            >×</button>
+                                                type="button"
+                                                className="btn btn-secondary"
+                                                onClick={() => runGuardianAutotuneLifecycleAction('review')}
+                                                disabled={!guardianAutotuneCanReview || guardianAutotuneActionLoading}
+                                                style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                            >
+                                                Review
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="btn btn-primary"
+                                                onClick={() => runGuardianAutotuneLifecycleAction('apply')}
+                                                disabled={!guardianAutotuneCanApply || guardianAutotuneActionLoading}
+                                                style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                            >
+                                                Apply
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="btn btn-secondary"
+                                                onClick={() => runGuardianAutotuneLifecycleAction('reject')}
+                                                disabled={!guardianAutotuneCanReject || guardianAutotuneActionLoading}
+                                                style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                            >
+                                                Reject
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="btn btn-secondary"
+                                                onClick={() => runGuardianAutotuneLifecycleAction('evaluate')}
+                                                disabled={!guardianAutotuneCanEvaluate || guardianAutotuneActionLoading}
+                                                style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                            >
+                                                Evaluate 48h
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="btn btn-secondary"
+                                                onClick={() => runGuardianAutotuneLifecycleAction('rollback')}
+                                                disabled={!guardianAutotuneCanRollback || guardianAutotuneActionLoading}
+                                                style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                            >
+                                                Rollback
+                                            </button>
                                         </div>
-                                        <div style={{ background: 'rgba(255,255,255,0.1)', borderRadius: '4px', height: '4px' }}>
-                                            <div style={{ background: '#10b981', height: '100%', width: `${pct}%` }} />
-                                        </div>
-                                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.7rem' }}>{progress.completed}/{progress.total} 任务</span>
                                     </div>
-                                );
-                            })}
-                        </div>
-                    </div>
-                )}
-            </section>
+                                ) : (
+                                    <div style={{ marginTop: '0.25rem', display: 'grid', gap: '0.35rem' }}>
+                                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            暂无可用提议，点击“生成提议”触发一次手动运行。
+                                        </div>
+                                        {(guardianAutotuneCanEvaluate || guardianAutotuneCanRollback) && (
+                                            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                                <button
+                                                    type="button"
+                                                    className="btn btn-secondary"
+                                                    onClick={() => runGuardianAutotuneLifecycleAction('evaluate')}
+                                                    disabled={!guardianAutotuneCanEvaluate || guardianAutotuneActionLoading}
+                                                    style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                                >
+                                                    Evaluate 48h
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="btn btn-secondary"
+                                                    onClick={() => runGuardianAutotuneLifecycleAction('rollback')}
+                                                    disabled={!guardianAutotuneCanRollback || guardianAutotuneActionLoading}
+                                                    style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                                >
+                                                    Rollback
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
 
-            {/* 已完成目标 - 仅规划视图 */}
-            {goals.completed?.length > 0 && (
-                <section style={{ marginTop: '2rem' }}>
-                    <h4 style={{ color: 'var(--text-secondary)', marginBottom: '1rem', fontSize: '0.875rem' }}>
-                        ✓ 已完成目标 ({goals.completed.length})
-                    </h4>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                        {goals.completed.map((goal) => (
-                            <span key={goal.id} style={{
-                                background: 'rgba(34, 197, 94, 0.2)',
-                                color: 'var(--success-color)',
-                                padding: '0.25rem 0.75rem',
-                                borderRadius: '999px',
-                                fontSize: '0.75rem'
-                            }}>
-                                {goal.title}
-                            </span>
-                        ))}
-                    </div>
-                </section>
-            )}
-            </>
-            )}
-
-            {/* 当前任务 - 仅执行视图 */}
-            {viewMode === 'execute' && (
-            <section>
-                <h4 style={{ color: 'var(--accent-color)', marginBottom: '1rem', fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: '1px' }}>
-                    ⚡ 当前任务
-                </h4>
-                {!currentTask ? (
-                    <div className="glass-card empty-state empty-state--success">
-                        <h2 className="empty-state-title">🎉 全部完成</h2>
-                        <p className="empty-state-desc">今日暂无待办任务</p>
-                        <Link to="/goals/new" className="btn btn-primary">规划新征程</Link>
-                    </div>
-                ) : (
-                    <div className="glass-card" style={{ padding: '2rem', position: 'relative', overflow: 'hidden' }}>
-                        {/* Background Glow */}
-                        <div style={{
-                            position: 'absolute', top: '0', right: '0', width: '200px', height: '200px',
-                            background: 'radial-gradient(circle, var(--accent-glow) 0%, transparent 70%)',
-                            opacity: 0.3, pointerEvents: 'none'
-                        }} />
-
-                        <h5 style={{ color: 'var(--text-secondary)', marginBottom: '0.5rem', marginTop: 0, fontSize: '0.875rem' }}>
-                            {currentTask.goal_title}
-                        </h5>
-                        <h2 style={{ fontSize: '1.75rem', marginBottom: '1.5rem', lineHeight: 1.2 }}>
-                            {currentTask.description}
-                        </h2>
-
-                        <div style={{ display: 'flex', gap: '1.5rem', marginBottom: '2rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-                            <span>🕒 {currentTask.estimated_minutes} 分钟</span>
-                            <span>📅 {currentTask.scheduled_date} {currentTask.scheduled_time !== 'Anytime' ? currentTask.scheduled_time : ''}</span>
+                            <div style={{ marginTop: '0.5rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                回滚建议: {guardianAutotuneRollbackRec?.should_rollback ? '建议回滚' : '无需回滚'}
+                                {guardianAutotuneRollbackRec?.reasons?.length > 0
+                                    ? ` · ${guardianAutotuneRollbackRec.reasons.join(' / ')}`
+                                    : ''}
+                            </div>
+                            {guardianAutotuneLatestEvaluated?.evaluated_at && (
+                                <div style={{ marginTop: '0.25rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    最近评估: {guardianAutotuneLatestEvaluated.evaluated_at}
+                                    {' · '}status={guardianAutotuneLatestEvaluated.trust_delta_status || '--'}
+                                    {' · '}delta={typeof guardianAutotuneLatestEvaluated.trust_delta_48h === 'number'
+                                        ? `${guardianAutotuneLatestEvaluated.trust_delta_48h >= 0 ? '+' : ''}${guardianAutotuneLatestEvaluated.trust_delta_48h.toFixed(3)}`
+                                        : '--'}
+                                </div>
+                            )}
                         </div>
 
-                        <div style={{ display: 'flex', gap: '1rem' }}>
-                            <button
-                                onClick={handleComplete}
-                                className="btn btn-primary"
-                                style={{ padding: '0.875rem 2rem', fontSize: '1rem' }}
-                                disabled={actionLoading}
-                            >
-                                {actionLoading ? '处理中...' : '✅ 完成任务'}
-                            </button>
-                            <button
-                                onClick={handleSkip}
-                                className="btn btn-secondary"
-                                disabled={actionLoading}
-                            >
-                                跳过
-                            </button>
-                        </div>
-                    </div>
-                )}
-            </section>
-            )}
-
-            {/* Guardian 复盘（最近 7 天 / 本周期） */}
-            {retrospective && (
-                <section style={{ marginTop: '2rem' }}>
-                    <h4 style={{ color: 'var(--accent-color)', marginBottom: '1rem', fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: '1px' }}>
-                        🛡️ Guardian 复盘
-                    </h4>
-                    <div className="glass-card" style={{ padding: '1.25rem' }}>
-                        <p style={{ margin: '0 0 1rem 0', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                            最近 {retrospective.period?.days ?? 7} 天 · {retrospective.period?.start_date ?? ''} 至 {retrospective.period?.end_date ?? ''}
-                        </p>
-                        <p style={{ margin: '0 0 1rem 0', fontSize: '1rem', lineHeight: 1.5 }}>
-                            {retrospective.observations?.[0] ?? retrospective.rhythm?.summary ?? '本周期暂无总结'}
-                        </p>
-                        {retrospective.observations?.length > 1 && (
-                            <ul style={{ margin: '0 0 1rem 0', paddingLeft: '1.25rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-                                {retrospective.observations.slice(1, 3).map((obs, i) => (
-                                    <li key={i}>{obs}</li>
-                                ))}
-                            </ul>
-                        )}
                         {retrospective.display && retrospective.suggestion && (
                             <div style={{
                                 background: 'rgba(139, 92, 246, 0.15)',
                                 border: '1px solid rgba(139, 92, 246, 0.3)',
                                 borderRadius: '8px',
-                                padding: '1rem',
-                                marginTop: '0.75rem'
+                                padding: '0.75rem'
                             }}>
-                                <span style={{ fontSize: '0.75rem', color: 'var(--accent-color)', fontWeight: 600 }}>建议</span>
-                                <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.9rem' }}>{retrospective.suggestion}</p>
-                                {retrospective.require_confirm && (
-                                    <p style={{ margin: '0.5rem 0 0 0', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>请确认已读</p>
+                                <div style={{ fontSize: '0.75rem', color: 'var(--accent-color)', fontWeight: 600 }}>建议</div>
+                                <p style={{ margin: '0.25rem 0 0.5rem 0', fontSize: '0.9rem' }}>{retrospective.suggestion}</p>
+                                <div
+                                    style={{
+                                        marginBottom: '0.55rem',
+                                        borderRadius: '8px',
+                                        border: '1px solid rgba(255,255,255,0.15)',
+                                        background: 'rgba(2, 6, 23, 0.18)',
+                                        padding: '0.45rem 0.55rem'
+                                    }}
+                                >
+                                    <div style={{ fontSize: '0.74rem', fontWeight: 600 }}>
+                                        为什么是这个建议
+                                    </div>
+                                    <div style={{ marginTop: '0.2rem', fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
+                                        {guardianExplainWhy}
+                                    </div>
+                                    <div style={{ marginTop: '0.38rem', fontSize: '0.74rem', fontWeight: 600 }}>
+                                        接下来会发生什么
+                                    </div>
+                                    <div style={{ marginTop: '0.2rem', fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
+                                        {guardianExplainNext}
+                                    </div>
+                                    {guardianExplainSignals.length > 0 && (
+                                        <div style={{ marginTop: '0.32rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                            信号: {guardianExplainSignals.join(' · ')}
+                                        </div>
+                                    )}
+                                </div>
+                                <div
+                                    style={{
+                                        marginBottom: '0.55rem',
+                                        borderRadius: '8px',
+                                        border: '1px solid rgba(255,255,255,0.15)',
+                                        background: 'rgba(255,255,255,0.04)',
+                                        padding: '0.45rem 0.55rem'
+                                    }}
+                                >
+                                    <div style={{ fontSize: '0.75rem', fontWeight: 600 }}>
+                                        当前代表: {guardianRoleRepresentingLabel} · 面向: {guardianRoleFacingLabel}
+                                    </div>
+                                    <div style={{ marginTop: '0.2rem', fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
+                                        {guardianRoleMessage}
+                                    </div>
+                                </div>
+
+                                <div style={{ marginBottom: '0.5rem', display: 'grid', gap: '0.25rem' }}>
+                                    <label style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        当前意图
+                                    </label>
+                                    <select
+                                        value={guardianResponseContext}
+                                        onChange={(e) => setGuardianResponseContext(e.target.value)}
+                                        style={{
+                                            borderRadius: '6px',
+                                            border: '1px solid rgba(255,255,255,0.2)',
+                                            background: 'rgba(0,0,0,0.25)',
+                                            color: 'white',
+                                            padding: '0.32rem 0.4rem',
+                                            maxWidth: '220px'
+                                        }}
+                                    >
+                                        {responseContextOptions.map((opt) => (
+                                            <option key={opt.value} value={opt.value}>
+                                                {opt.label}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        {responseContextHintMap[guardianResponseContext] || ''}
+                                    </div>
+                                </div>
+
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                    <button
+                                        type="button"
+                                        className="btn btn-primary"
+                                        onClick={handleConfirmIntervention}
+                                        disabled={guardianResponseLoading || retrospective.confirmation_action?.confirmed}
+                                        style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
+                                    >
+                                        {retrospective.confirmation_action?.confirmed
+                                            ? '已确认'
+                                            : guardianResponseLoading ? '提交中...' : '确认建议'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={() => handleGuardianResponse('snooze')}
+                                        disabled={guardianResponseLoading}
+                                        style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
+                                    >
+                                        稍后处理
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={() => handleGuardianResponse('dismiss')}
+                                        disabled={guardianResponseLoading}
+                                        style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
+                                    >
+                                        暂不采纳
+                                    </button>
+                                </div>
+                                {retrospective.confirmation_action?.required && !retrospective.confirmation_action?.confirmed && (
+                                    <div style={{ marginTop: '0.35rem', fontSize: '0.75rem', color: '#fcd34d' }}>
+                                        当前为 ASK 模式，需要最终确认。
+                                    </div>
                                 )}
+                                {guardianLatestResponse && (
+                                    <div style={{ marginTop: '0.35rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        最近响应: {guardianLatestResponse.action || '--'}
+                                        {guardianLatestResponse.timestamp ? ` · ${guardianLatestResponse.timestamp}` : ''}
+                                        {guardianLatestResponseContextLabel ? ` · ${guardianLatestResponseContextLabel}` : ''}
+                                    </div>
+                                )}
+                                {guardianLatestRecoveryStep && (
+                                    <div style={{ marginTop: '0.3rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        恢复下一步: {guardianLatestRecoveryStep}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {retrospective.suggestion_sources?.length > 0 && (
+                            <div style={{ marginTop: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', fontWeight: 600 }}>
+                                    建议来源（可追溯）
+                                </div>
+                                {retrospective.suggestion_sources.map((src, idx) => {
+                                    const severityStyle = severityStyleMap[src.severity] || severityStyleMap.info;
+                                    return (
+                                        <div
+                                            key={`${src.signal || 'signal'}_${idx}`}
+                                            style={{
+                                                border: '1px solid var(--glass-border)',
+                                                borderRadius: '8px',
+                                                padding: '0.65rem',
+                                                background: 'rgba(255,255,255,0.03)'
+                                            }}
+                                        >
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                                <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                                                    <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>
+                                                        {signalNameMap[src.signal] || src.signal}
+                                                    </span>
+                                                    <span style={{ ...severityStyle, fontSize: '0.7rem', borderRadius: '999px', padding: '0.1rem 0.4rem', fontWeight: 600 }}>
+                                                        {String(src.severity || 'info').toUpperCase()}
+                                                    </span>
+                                                </div>
+                                                <span style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>
+                                                    命中 {src.count ?? 0} / 阈值 {src.threshold ?? '-'}
+                                                </span>
+                                            </div>
+                                            <p style={{ margin: '0.4rem 0 0 0', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{src.summary}</p>
+                                            {src.evidence?.length > 0 && (
+                                                <div style={{ marginTop: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                                                    {src.evidence.map((ev, evIdx) => (
+                                                        <div
+                                                            key={`${src.signal || 'signal'}_ev_${evIdx}`}
+                                                            style={{
+                                                                fontSize: '0.75rem',
+                                                                color: 'var(--text-secondary)',
+                                                                background: 'rgba(0,0,0,0.2)',
+                                                                borderRadius: '6px',
+                                                                padding: '0.35rem 0.5rem'
+                                                            }}
+                                                        >
+                                                            <div>[{ev.type || 'unknown'}] {ev.detail || 'no detail'}</div>
+                                                            <div style={{ opacity: 0.85 }}>
+                                                                {ev.timestamp || 'no timestamp'} {ev.event_id ? ` · ${ev.event_id}` : ''}
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
                             </div>
                         )}
                     </div>
                 </section>
             )}
+
+            {guardianAutotuneRetryResult && (
+                <div
+                    style={{
+                        position: 'fixed',
+                        inset: 0,
+                        background: 'rgba(0, 0, 0, 0.55)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        zIndex: 1010,
+                        padding: '1rem'
+                    }}
+                    onClick={closeGuardianAutotuneRetryResultModal}
+                >
+                    <div
+                        className="glass-card"
+                        style={{
+                            width: '100%',
+                            maxWidth: '860px',
+                            maxHeight: '86vh',
+                            padding: '1rem',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '0.65rem'
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                            <h4 style={{ margin: 0 }}>重跑失败评估结果</h4>
+                            <button
+                                type="button"
+                                className="btn btn-secondary"
+                                onClick={closeGuardianAutotuneRetryResultModal}
+                                style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                            >
+                                关闭
+                            </button>
+                        </div>
+                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                            source_log={guardianAutotuneRetryResult?.logTimestamp || '--'}
+                            {' · '}
+                            finished_at={guardianAutotuneRetryResult?.finishedAt || '--'}
+                        </div>
+                        <div style={{ display: 'grid', gap: '0.35rem', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))' }}>
+                            <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '0.35rem 0.4rem', background: 'rgba(255,255,255,0.03)' }}>
+                                <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>总数</div>
+                                <div style={{ marginTop: '0.1rem', fontSize: '0.8rem' }}>{guardianAutotuneRetryResult?.totalCount ?? 0}</div>
+                            </div>
+                            <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '0.35rem 0.4rem', background: 'rgba(255,255,255,0.03)' }}>
+                                <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>成功</div>
+                                <div style={{ marginTop: '0.1rem', fontSize: '0.8rem', color: '#86efac' }}>{guardianAutotuneRetryResult?.successCount ?? 0}</div>
+                            </div>
+                            <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '0.35rem 0.4rem', background: 'rgba(255,255,255,0.03)' }}>
+                                <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>失败</div>
+                                <div style={{ marginTop: '0.1rem', fontSize: '0.8rem', color: '#fca5a5' }}>{guardianAutotuneRetryResult?.failedCount ?? 0}</div>
+                            </div>
+                        </div>
+
+                        {guardianAutotuneRetryFailedItems.length > 0 && (
+                            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    onClick={copyAllGuardianAutotuneRetryFailureContexts}
+                                    style={{ fontSize: '0.68rem', padding: '0.2rem 0.55rem' }}
+                                >
+                                    {guardianAutotuneRetryCopiedKey === 'all_failures'
+                                        ? '已复制全部失败上下文'
+                                        : `复制全部失败上下文 (${guardianAutotuneRetryFailedItems.length})`}
+                                </button>
+                            </div>
+                        )}
+
+                        <div style={{ overflowY: 'auto', maxHeight: '48vh', display: 'grid', gap: '0.32rem', paddingRight: '0.2rem' }}>
+                            {guardianAutotuneRetryResultItems.map((entry, idx) => {
+                                const failed = entry?.status === 'failed';
+                                const copyKey = getAutotuneRetryResultKey(entry, idx);
+                                return (
+                                    <div
+                                        key={`autotune_retry_result_${copyKey}`}
+                                        style={{
+                                            border: failed ? '1px solid rgba(248,113,113,0.35)' : '1px solid rgba(134,239,172,0.35)',
+                                            borderRadius: '6px',
+                                            padding: '0.38rem 0.45rem',
+                                            background: failed ? 'rgba(127,29,29,0.18)' : 'rgba(20,83,45,0.18)'
+                                        }}
+                                    >
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                            <div style={{ fontSize: '0.7rem' }}>
+                                                #{idx + 1}
+                                                {' · '}proposal={entry?.proposal_id || '--'}
+                                            </div>
+                                            <span style={{ fontSize: '0.66rem', color: failed ? '#fca5a5' : '#86efac' }}>
+                                                {failed ? 'FAILED' : 'SUCCESS'}
+                                            </span>
+                                        </div>
+                                        <div style={{ marginTop: '0.12rem', fontSize: '0.68rem', color: 'var(--text-secondary)' }}>
+                                            fingerprint={entry?.fingerprint || '--'}
+                                            {' · '}status={entry?.api_status || '--'}
+                                            {' · '}code={entry?.status_code ?? '--'}
+                                        </div>
+                                        {failed ? (
+                                            <div style={{ marginTop: '0.2rem', display: 'flex', justifyContent: 'space-between', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                                                <div style={{ fontSize: '0.68rem', color: '#fecaca', flex: 1, minWidth: '220px' }}>
+                                                    detail={entry?.detail || '--'}
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    className="btn btn-secondary"
+                                                    onClick={() => copyGuardianAutotuneRetryFailureContext(entry, idx)}
+                                                    style={{ fontSize: '0.66rem', padding: '0.16rem 0.5rem' }}
+                                                >
+                                                    {guardianAutotuneRetryCopiedKey === copyKey
+                                                        ? '已复制错误上下文'
+                                                        : '复制错误上下文'}
+                                                </button>
+                                            </div>
+                                        ) : (
+                                            <div style={{ marginTop: '0.2rem', fontSize: '0.68rem', color: 'var(--text-secondary)' }}>
+                                                evaluated_at={entry?.evaluated_at || '--'}
+                                                {entry?.trust_delta_status ? ` · trust_delta_status=${entry.trust_delta_status}` : ''}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            <OverlayModal
+                open={skipDialogOpen}
+                title="跳过当前任务"
+                onCancel={() => {
+                    if (actionLoading) return;
+                    setSkipDialogOpen(false);
+                    setSkipReason('');
+                    setSkipContext('recovering');
+                }}
+                onConfirm={submitSkip}
+                confirmText={actionLoading ? '提交中...' : '确认跳过'}
+                disabled={actionLoading}
+            >
+                <p style={{ color: 'var(--text-secondary)', margin: 0 }}>请填写跳过原因，便于 Guardian 复盘。</p>
+                <div style={{ marginTop: '0.65rem', display: 'grid', gap: '0.25rem' }}>
+                    <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                        跳过上下文
+                    </label>
+                    <select
+                        value={skipContext}
+                        onChange={(e) => setSkipContext(e.target.value)}
+                        style={{
+                            borderRadius: '6px',
+                            border: '1px solid rgba(255,255,255,0.2)',
+                            background: 'rgba(0,0,0,0.25)',
+                            color: 'white',
+                            padding: '0.35rem 0.45rem',
+                            maxWidth: '240px'
+                        }}
+                    >
+                        {responseContextOptions.map((opt) => (
+                            <option key={`skip_ctx_${opt.value}`} value={opt.value}>
+                                {opt.label}
+                            </option>
+                        ))}
+                    </select>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                        {responseContextHintMap[skipContext] || ''}
+                    </div>
+                </div>
+                <textarea
+                    value={skipReason}
+                    onChange={(e) => setSkipReason(e.target.value)}
+                    rows={3}
+                    style={{
+                        marginTop: '0.6rem',
+                        width: '100%',
+                        borderRadius: '8px',
+                        border: '1px solid rgba(255,255,255,0.2)',
+                        padding: '0.65rem',
+                        background: 'rgba(0,0,0,0.25)',
+                        color: 'white',
+                        resize: 'vertical'
+                    }}
+                    placeholder="例如：当前上下文不足，计划明天上午处理"
+                />
+            </OverlayModal>
+
+            <OverlayModal
+                open={Boolean(deleteTargetGoalId)}
+                title="删除目标"
+                onCancel={() => {
+                    if (actionLoading) return;
+                    setDeleteTargetGoalId(null);
+                }}
+                onConfirm={confirmDeleteGoal}
+                confirmText={actionLoading ? '删除中...' : '确认删除'}
+                disabled={actionLoading}
+            >
+                <p style={{ color: 'var(--text-secondary)', margin: 0 }}>
+                    删除后该目标将从当前视图移除。是否继续？
+                </p>
+            </OverlayModal>
+
+            <OverlayModal
+                open={activateAnchorModalOpen}
+                title="激活新 Anchor"
+                onCancel={() => {
+                    if (activateAnchorLoading) return;
+                    setActivateAnchorModalOpen(false);
+                }}
+                onConfirm={handleActivateAnchor}
+                confirmText={activateAnchorLoading ? '激活中...' : '确认激活'}
+                disabled={activateAnchorLoading}
+            >
+                <p style={{ color: 'var(--text-secondary)', margin: 0 }}>
+                    激活后 Guardian 与目标对齐会切换到新的价值锚点版本。是否继续？
+                </p>
+            </OverlayModal>
         </div>
     );
 }

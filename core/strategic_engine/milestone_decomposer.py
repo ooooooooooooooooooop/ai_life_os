@@ -1,21 +1,24 @@
-from typing import List, Dict, Any, Optional
-import json
+from typing import List
 from datetime import datetime
 
 from core.llm_adapter import get_llm
 from core.utils import load_prompt, parse_llm_json
 from core.objective_engine.models import GoalLayer, ObjectiveNode, GoalSource
 
-def decompose_vision(vision_title: str, vision_description: str, timeframe: str = "18 months") -> List[ObjectiveNode]:
+def decompose_vision(
+    vision_title: str,
+    vision_description: str,
+    timeframe: str = "18 months",
+) -> List[ObjectiveNode]:
     """
     Decompose a Vision into Objectives and initial Goals.
     """
     llm = get_llm("strategic_brain")
     system_prompt = load_prompt("milestone_planning")
-    
+
     if not system_prompt:
         system_prompt = "You are a strategic planner."
-        
+
     prompt = f"""Vision: {vision_title}
 Description: {vision_description}
 Timeframe: {timeframe}
@@ -40,9 +43,9 @@ Output JSON format:
   ]
 }}
 ```"""
-    
+
     response = llm.generate(prompt, system_prompt=system_prompt)
-    
+
     nodes = []
     if response.success and response.content:
         data = parse_llm_json(response.content)
@@ -59,7 +62,7 @@ Output JSON format:
                     deadline=obj_data.get("deadline")
                 )
                 nodes.append(obj_node)
-                
+
                 # Create Goal Nodes
                 for g_data in obj_data.get("goals", []):
                     goal_node = ObjectiveNode(
@@ -73,5 +76,5 @@ Output JSON format:
                     )
                     nodes.append(goal_node)
                     obj_node.children_ids.append(goal_node.id)
-                    
+
     return nodes
