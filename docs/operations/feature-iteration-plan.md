@@ -213,3 +213,43 @@ Iteration 6 已把 autotune 从“仅提议（shadow）”升级为“可治理�
 
 详细执行拆解见：
 `.taskflow/archive/2026-02-12_guardian-autotune-ops-iteration_v1/task_plan.md`
+
+## 12. 下一轮建议（Iteration 8：Humanized Trust Calibration Loop）
+
+在 Iteration 7 后，瓶颈从“可运营”转向“可长期信任”：
+系统已经能追踪调参与效果，但还不能稳定回答“这套干预是否让我更自由，而不是更被管理”。
+
+### 目标
+- 将干预策略从“全局阈值”升级为“情境化节奏”（专注期 / 恢复期 / 低能量期）。
+- 建立“用户边界记忆”（consent memory）：记录并执行用户对提醒频率、提醒通道、安静时段的偏好。
+- 增加“信任修复回路”：当建议被连续拒绝或回滚时，自动降级为低压支持并给出最小可执行恢复步骤。
+- 强化根本目的量化兑现：把 “Automate the Mundane, so the Extraordinary can Bloom” 映射到可运营指标。
+
+### 建议范围
+- `core/steward.py`（情境化干预节奏与强度切换）
+- `core/task_dispatcher.py`（失败后最小恢复步骤与低压重排）
+- `core/retrospective.py`（信任/负担/恢复速度指标聚合）
+- `web/backend/routers/api.py`（边界记忆配置与状态投影接口）
+- `web/client/src/pages/Home.jsx`（边界偏好设置、信任修复卡片、降压提示）
+- `config/blueprint.yaml`（默认护栏与策略降级开关）
+- `tests/test_goal_service.py`（边界记忆与策略降级回归）
+- `tests/test_retrospective_signals.py`（人性化指标与解释性回归）
+- `tests/test_guardian_outcome_loop.py`（根本目的指标闭环回归）
+
+### 核心指标（Iteration 8）
+- `perceived_control_score`：用户感到“被支持而非被控制”的占比（7d）。
+- `interruption_burden_rate`：单位时间内高打扰提示占比（越低越好）。
+- `recovery_time_to_resume_minutes`：L2 中断到恢复执行的中位时长（越低越好）。
+- `mundane_time_saved_hours`：L1 自动恢复与批量处理节省的人工时间估算（7d）。
+
+### 验收标准
+- 用户可在 Home 明确配置并生效至少 3 类边界偏好（频率/通道/安静时段）。
+- 当连续出现拒绝/回滚时，系统会自动降级干预强度，并提供最小恢复步骤，不再持续加压。
+- `/state` 与 `/retrospective` 可稳定返回上述核心指标，且在无数据场景下有明确 `status/reason`。
+- 回归测试通过，且不削弱既有 L2 保护能力与 autotune assist 治理链路。
+
+### 风险与控制
+- 风险：边界偏好过多导致配置复杂度上升。
+- 控制：提供“推荐模板 + 一键恢复默认”，默认保持低配置负担。
+- 风险：过度降级可能削弱关键干预效果。
+- 控制：仅在“连续拒绝/回滚”窗口触发降级，且保留 L2 关键保护下限。
