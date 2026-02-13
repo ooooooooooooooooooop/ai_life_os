@@ -9,7 +9,17 @@ from core.models import Task, TaskStatus
 class TaskDispatcher:
     """任务调度器"""
 
-    def get_current_task(self, tasks: List[Task], current_time: datetime = None) -> Optional[Task]:
+    @staticmethod
+    def _is_recovery_task(task: Task) -> bool:
+        task_id = str(getattr(task, "id", "") or "")
+        return task_id.endswith("_recovery")
+
+    def get_current_task(
+        self,
+        tasks: List[Task],
+        current_time: datetime = None,
+        prioritize_recovery: bool = False,
+    ) -> Optional[Task]:
         """
         获取当前应该执行的任务。
         策略：
@@ -31,6 +41,11 @@ class TaskDispatcher:
 
         if not candidates:
             return None
+
+        if prioritize_recovery:
+            recovery_candidates = [t for t in candidates if self._is_recovery_task(t)]
+            if recovery_candidates:
+                candidates = recovery_candidates
 
         # 排序逻辑：
         # 1. 过期任务优先 (date 小的在前)
@@ -84,6 +99,7 @@ class TaskDispatcher:
         tasks: List[Task],
         active_goals_ids: List[str],
         current_time: datetime = None,
+        low_pressure: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Collect overdue task updates for deterministic replay:
@@ -109,7 +125,15 @@ class TaskDispatcher:
             if scheduled_date is None or scheduled_date >= today:
                 continue
 
-            scheduled_time = getattr(task, "scheduled_time", None) or "Anytime"
+            if low_pressure and not self._is_recovery_task(task):
+                continue
+
+            if low_pressure:
+                scheduled_time = "Anytime"
+                reschedule_reason = "overdue_reschedule_low_pressure"
+            else:
+                scheduled_time = getattr(task, "scheduled_time", None) or "Anytime"
+                reschedule_reason = "overdue_reschedule"
             updates.append(
                 {
                     "id": getattr(task, "id", None),
@@ -118,7 +142,8 @@ class TaskDispatcher:
                         "scheduled_time": scheduled_time,
                     },
                     "meta": {
-                        "reason": "overdue_reschedule",
+                        "reason": reschedule_reason,
+                        "low_pressure": bool(low_pressure),
                         "previous_date": scheduled_date.isoformat(),
                     },
                 }

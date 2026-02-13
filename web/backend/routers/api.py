@@ -113,6 +113,21 @@ class GuardianConfigUpdateRequest(BaseModel):
     authority: Optional[GuardianAuthorityConfigRequest] = None
 
 
+class GuardianBoundariesQuietHoursConfigRequest(BaseModel):
+    enabled: bool = True
+    start_hour: int = 22
+    end_hour: int = 8
+    timezone: str = "local"
+
+
+class GuardianBoundariesConfigUpdateRequest(BaseModel):
+    reminder_frequency: str = "balanced"
+    reminder_channel: str = "in_app"
+    quiet_hours: GuardianBoundariesQuietHoursConfigRequest = Field(
+        default_factory=GuardianBoundariesQuietHoursConfigRequest
+    )
+
+
 class GuardianAutoTuneTriggerConfigRequest(BaseModel):
     lookback_days: int = 7
     min_event_count: int = 20
@@ -193,6 +208,8 @@ ALLOWED_L2_SESSION_INTERRUPT_REASONS = {
     "tooling_blocked",
     "other",
 }
+ALLOWED_GUARDIAN_BOUNDARY_FREQUENCIES = {"low", "balanced", "high"}
+ALLOWED_GUARDIAN_BOUNDARY_CHANNELS = {"in_app", "digest", "silent"}
 ALLOWED_GUARDIAN_AUTOTUNE_MODES = {"shadow", "assist"}
 AUTOTUNE_EVENT_PROPOSED = "guardian_autotune_shadow_proposed"
 AUTOTUNE_EVENT_REVIEWED = "guardian_autotune_reviewed"
@@ -283,6 +300,19 @@ def _guardian_autotune_defaults() -> Dict[str, Any]:
             "horizon_hours": 48,
             "lookback_days": 90,
             "max_targets_per_cycle": 3,
+        },
+    }
+
+
+def _guardian_boundaries_defaults() -> Dict[str, Any]:
+    return {
+        "reminder_frequency": "balanced",
+        "reminder_channel": "in_app",
+        "quiet_hours": {
+            "enabled": True,
+            "start_hour": 22,
+            "end_hour": 8,
+            "timezone": "local",
         },
     }
 
@@ -528,6 +558,54 @@ def _normalized_guardian_autotune_config(raw: Optional[Dict[str, Any]] = None) -
     }
 
 
+def _normalized_guardian_boundaries_config(raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    defaults = _guardian_boundaries_defaults()
+    raw = raw if isinstance(raw, dict) else {}
+    raw_boundaries = raw.get("guardian_boundaries", {})
+    if not isinstance(raw_boundaries, dict):
+        raw_boundaries = {}
+
+    reminder_frequency = str(
+        raw_boundaries.get("reminder_frequency", defaults["reminder_frequency"])
+    ).strip().lower()
+    if reminder_frequency not in ALLOWED_GUARDIAN_BOUNDARY_FREQUENCIES:
+        reminder_frequency = defaults["reminder_frequency"]
+
+    reminder_channel = str(
+        raw_boundaries.get("reminder_channel", defaults["reminder_channel"])
+    ).strip().lower()
+    if reminder_channel not in ALLOWED_GUARDIAN_BOUNDARY_CHANNELS:
+        reminder_channel = defaults["reminder_channel"]
+
+    raw_quiet_hours = raw_boundaries.get("quiet_hours", {})
+    if not isinstance(raw_quiet_hours, dict):
+        raw_quiet_hours = {}
+    timezone = str(raw_quiet_hours.get("timezone", "local") or "local").strip()
+    if not timezone:
+        timezone = "local"
+
+    return {
+        "reminder_frequency": reminder_frequency,
+        "reminder_channel": reminder_channel,
+        "quiet_hours": {
+            "enabled": bool(raw_quiet_hours.get("enabled", defaults["quiet_hours"]["enabled"])),
+            "start_hour": _coerce_int(
+                raw_quiet_hours.get("start_hour"),
+                defaults["quiet_hours"]["start_hour"],
+                min_value=0,
+                max_value=23,
+            ),
+            "end_hour": _coerce_int(
+                raw_quiet_hours.get("end_hour"),
+                defaults["quiet_hours"]["end_hour"],
+                min_value=0,
+                max_value=23,
+            ),
+            "timezone": timezone,
+        },
+    }
+
+
 def _save_guardian_config(config_payload: Dict[str, Any]) -> None:
     existing = _load_blueprint_yaml()
     if not isinstance(existing, dict):
@@ -565,6 +643,23 @@ def _save_guardian_autotune_config(config_payload: Dict[str, Any]) -> None:
         or {},
         "auto_evaluate": (
             config_payload.get("auto_evaluate") if isinstance(config_payload, dict) else {}
+        )
+        or {},
+    }
+    BLUEPRINT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(BLUEPRINT_CONFIG_PATH, "w", encoding="utf-8") as f:
+        yaml.safe_dump(existing, f, allow_unicode=True, sort_keys=False)
+
+
+def _save_guardian_boundaries_config(config_payload: Dict[str, Any]) -> None:
+    existing = _load_blueprint_yaml()
+    if not isinstance(existing, dict):
+        existing = {}
+    existing["guardian_boundaries"] = {
+        "reminder_frequency": str(config_payload.get("reminder_frequency", "balanced")).lower(),
+        "reminder_channel": str(config_payload.get("reminder_channel", "in_app")).lower(),
+        "quiet_hours": (
+            config_payload.get("quiet_hours") if isinstance(config_payload, dict) else {}
         )
         or {},
     }
@@ -2351,6 +2446,7 @@ async def get_state():
                 "retrospective.humanization_metrics",
                 "retrospective.north_star_metrics",
                 "retrospective.blueprint_narrative",
+                "guardian.boundaries",
             ],
             "decision_reason": {
                 "trigger": "State requested by API client",
@@ -2363,7 +2459,9 @@ async def get_state():
     )
     retrospective = build_guardian_retrospective_response(days=7)
     guardian_state = system_state.get("guardian") or {}
-    guardian_autotune = _normalized_guardian_autotune_config(_load_blueprint_yaml())
+    blueprint_yaml = _load_blueprint_yaml()
+    guardian_autotune = _normalized_guardian_autotune_config(blueprint_yaml)
+    guardian_boundaries = _normalized_guardian_boundaries_config(blueprint_yaml)
     alignment_summary = service.summarize_alignment(registry.objectives + registry.goals)
     alignment_trend = (retrospective.get("alignment") or {}).get("trend", {})
     l2_protection = retrospective.get("l2_protection") or {}
@@ -2372,6 +2470,11 @@ async def get_state():
     humanization_metrics = retrospective.get("humanization_metrics") or {}
     if not isinstance(humanization_metrics, dict):
         humanization_metrics = {}
+    trust_calibration_metric = (
+        humanization_metrics.get("trust_calibration")
+        if isinstance(humanization_metrics.get("trust_calibration"), dict)
+        else {}
+    )
     north_star_metrics = retrospective.get("north_star_metrics") or {}
     if not isinstance(north_star_metrics, dict):
         north_star_metrics = {}
@@ -2459,6 +2562,7 @@ async def get_state():
             "blueprint_narrative": blueprint_narrative,
             "explainability": retrospective.get("explainability", {}),
             "autotune": guardian_autotune,
+            "boundaries": guardian_boundaries,
             "authority": guardian_authority,
             "escalation_stage": guardian_escalation.get("stage"),
             "safe_mode": guardian_safe_mode,
@@ -2476,6 +2580,22 @@ async def get_state():
                 "friction_load": humanization_metrics.get("friction_load", {}),
                 "support_vs_override": humanization_metrics.get(
                     "support_vs_override",
+                    {},
+                ),
+                "perceived_control_score": trust_calibration_metric.get(
+                    "perceived_control_score",
+                    {},
+                ),
+                "interruption_burden_rate": trust_calibration_metric.get(
+                    "interruption_burden_rate",
+                    {},
+                ),
+                "recovery_time_to_resume_minutes": trust_calibration_metric.get(
+                    "recovery_time_to_resume_minutes",
+                    {},
+                ),
+                "mundane_time_saved_hours": trust_calibration_metric.get(
+                    "mundane_time_saved_hours",
                     {},
                 ),
                 "north_star": north_star_metrics,
@@ -2981,6 +3101,56 @@ async def update_guardian_config(request: GuardianConfigUpdateRequest):
     append_event(
         {
             "type": "guardian_config_updated",
+            "timestamp": datetime.now().isoformat(),
+            "payload": payload,
+        }
+    )
+    return {
+        "status": "updated",
+        "source_path": str(BLUEPRINT_CONFIG_PATH),
+        "config": payload,
+    }
+
+
+@router.get("/guardian/boundaries/config")
+async def get_guardian_boundaries_config():
+    config_payload = _normalized_guardian_boundaries_config(_load_blueprint_yaml())
+    return {
+        "source_path": str(BLUEPRINT_CONFIG_PATH),
+        "config": config_payload,
+    }
+
+
+@router.put("/guardian/boundaries/config")
+async def update_guardian_boundaries_config(request: GuardianBoundariesConfigUpdateRequest):
+    reminder_frequency = str(request.reminder_frequency or "balanced").strip().lower()
+    if reminder_frequency not in ALLOWED_GUARDIAN_BOUNDARY_FREQUENCIES:
+        raise HTTPException(
+            status_code=400,
+            detail="reminder_frequency must be one of low | balanced | high",
+        )
+
+    reminder_channel = str(request.reminder_channel or "in_app").strip().lower()
+    if reminder_channel not in ALLOWED_GUARDIAN_BOUNDARY_CHANNELS:
+        raise HTTPException(
+            status_code=400,
+            detail="reminder_channel must be one of in_app | digest | silent",
+        )
+
+    payload = {
+        "reminder_frequency": reminder_frequency,
+        "reminder_channel": reminder_channel,
+        "quiet_hours": {
+            "enabled": bool(request.quiet_hours.enabled),
+            "start_hour": _coerce_int(request.quiet_hours.start_hour, 22, 0, 23),
+            "end_hour": _coerce_int(request.quiet_hours.end_hour, 8, 0, 23),
+            "timezone": str(request.quiet_hours.timezone or "local").strip() or "local",
+        },
+    }
+    _save_guardian_boundaries_config(payload)
+    append_event(
+        {
+            "type": "guardian_boundaries_config_updated",
             "timestamp": datetime.now().isoformat(),
             "payload": payload,
         }

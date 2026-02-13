@@ -99,6 +99,68 @@ python tools/migrate_event_log_schema.py --apply
 
 ## Guardian Autotune Operation
 
+### Guardian Boundary Memory
+
+Use boundary memory to express low-disruption preferences:
+
+- `GET /api/v1/guardian/boundaries/config`
+- `PUT /api/v1/guardian/boundaries/config`
+
+Main fields:
+
+- `reminder_frequency` (`low | balanced | high`)
+- `reminder_channel` (`in_app | digest | silent`)
+- `quiet_hours.enabled`
+- `quiet_hours.start_hour` (`0-23`)
+- `quiet_hours.end_hour` (`0-23`)
+- `quiet_hours.timezone` (default `local`)
+
+### Guardian Trust-Repair Cadence
+
+Under `guardian_authority.cadence` in `config/blueprint.yaml`:
+
+- `reminder_budget_window_hours`
+- `reminder_budget_max_prompts`
+- `reminder_budget_enforce`
+- `support_recovery_cooldown_hours`
+- `override_cooldown_hours`
+- `observe_cooldown_hours`
+- `trust_repair_window_hours`
+- `trust_repair_negative_streak`
+- `trust_repair_cooldown_hours`
+
+When `trust_repair_negative_streak` is reached within `trust_repair_window_hours`,
+Guardian policy shifts to low-pressure `trust_repair` mode.
+
+### Trust-Repair Dispatch Contract
+
+`GET /api/v1/tasks/current` now returns low-pressure dispatch context when trust-repair is active:
+
+- `dispatch_policy.mode`
+- `dispatch_policy.low_pressure`
+- `dispatch_policy.prioritize_recovery`
+- `dispatch_policy.repair_min_step`
+
+In low-pressure mode, overdue reschedule only targets `_recovery` tasks.
+
+### Iteration 8 Trust Calibration Metrics
+
+`/api/v1/retrospective` exposes:
+
+- `humanization_metrics.trust_calibration.perceived_control_score`
+- `humanization_metrics.trust_calibration.interruption_burden_rate`
+- `humanization_metrics.trust_calibration.recovery_time_to_resume_minutes`
+- `humanization_metrics.trust_calibration.mundane_time_saved_hours`
+
+`/api/v1/state` mirrors these under:
+
+- `guardian.metrics.perceived_control_score`
+- `guardian.metrics.interruption_burden_rate`
+- `guardian.metrics.recovery_time_to_resume_minutes`
+- `guardian.metrics.mundane_time_saved_hours`
+
+All four fields include explicit `status/reason` in no-data scenarios.
+
 ### Modes
 
 - `shadow`  

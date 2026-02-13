@@ -809,10 +809,15 @@ def test_build_response_includes_humanization_metrics_and_explainability(monkeyp
 
     payload = retrospective.build_guardian_retrospective_response(days=7)
     metrics = payload["humanization_metrics"]
+    trust_calibration = metrics["trust_calibration"]
 
     assert metrics["recovery_adoption_rate"]["rate"] == 1.0
     assert metrics["friction_load"]["level"] == "high"
     assert metrics["support_vs_override"]["override_count"] == 1
+    assert trust_calibration["perceived_control_score"]["status"] == "ready"
+    assert trust_calibration["interruption_burden_rate"]["status"] == "ready"
+    assert trust_calibration["recovery_time_to_resume_minutes"]["status"] == "unavailable"
+    assert trust_calibration["mundane_time_saved_hours"]["status"] == "ready"
     assert payload["north_star_metrics"]["window_days"] == 7
     assert "mundane_automation_coverage" in payload["north_star_metrics"]
     assert "human_trust_index" in payload["north_star_metrics"]
@@ -823,6 +828,64 @@ def test_build_response_includes_humanization_metrics_and_explainability(monkeyp
         "Suggestion is triggered by:"
     )
     assert "Next suggested recovery step" in payload["explainability"]["what_happens_next"]
+
+
+def test_humanization_metrics_trust_calibration_recovers_l2_resume_time():
+    events = [
+        {
+            "type": "task_recovery_suggested",
+            "timestamp": "2026-02-11T08:00:00",
+            "payload": {"recovery_task_id": "t_recovery_1"},
+        },
+        {
+            "type": "task_updated",
+            "timestamp": "2026-02-11T08:05:00",
+            "payload": {"id": "t_recovery_1", "updates": {"status": "completed"}},
+        },
+        {
+            "type": "guardian_intervention_responded",
+            "timestamp": "2026-02-11T08:10:00",
+            "payload": {"days": 7, "action": "confirm", "context": "recovering"},
+        },
+        {
+            "type": "l2_session_interrupted",
+            "timestamp": "2026-02-11T09:00:00",
+            "payload": {"session_id": "s1", "reason": "external_interrupt"},
+        },
+        {
+            "type": "l2_session_resumed",
+            "timestamp": "2026-02-11T09:12:00",
+            "payload": {"session_id": "s1"},
+        },
+    ]
+
+    metrics = retrospective._guardian_humanization_metrics(
+        events=events,
+        days=7,
+        deviation_signals=[],
+    )
+    trust_calibration = metrics["trust_calibration"]
+
+    assert trust_calibration["perceived_control_score"]["status"] == "ready"
+    assert trust_calibration["interruption_burden_rate"]["status"] == "ready"
+    assert trust_calibration["recovery_time_to_resume_minutes"]["status"] == "ready"
+    assert trust_calibration["recovery_time_to_resume_minutes"]["median_minutes"] == 12
+    assert trust_calibration["mundane_time_saved_hours"]["status"] == "ready"
+    assert trust_calibration["mundane_time_saved_hours"]["hours"] == 0.25
+
+
+def test_humanization_metrics_trust_calibration_returns_unavailable_without_data():
+    metrics = retrospective._guardian_humanization_metrics(
+        events=[],
+        days=7,
+        deviation_signals=[],
+    )
+    trust_calibration = metrics["trust_calibration"]
+
+    assert trust_calibration["perceived_control_score"]["status"] == "unavailable"
+    assert trust_calibration["interruption_burden_rate"]["status"] == "unavailable"
+    assert trust_calibration["recovery_time_to_resume_minutes"]["status"] == "unavailable"
+    assert trust_calibration["mundane_time_saved_hours"]["status"] == "unavailable"
 
 
 def test_intervention_policy_suppresses_repeated_prompts_with_budget(monkeypatch):
@@ -931,6 +994,105 @@ def test_intervention_policy_suppresses_repeated_prompts_with_budget(monkeypatch
     assert payload["display"] is False
     assert payload["suggestion"] == ""
     assert payload["explainability"]["why_now"]
+
+
+def test_intervention_policy_switches_to_trust_repair_on_consecutive_rejection_or_rollback(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        retrospective,
+        "generate_guardian_retrospective",
+        lambda days: {
+            "period": {"days": days, "start_date": "2026-02-01", "end_date": "2026-02-07"},
+            "generated_at": "2026-02-11T13:00:00",
+            "rhythm": {"broken": False, "summary": "ok"},
+            "alignment": {"deviated": False, "summary": "ok"},
+            "friction": {"repeated_skip": True, "delay_signals": False, "summary": "friction"},
+            "l2_protection": {"ratio": 0.6, "level": "medium", "summary": "moderate"},
+            "l2_session": {"active_session": False, "active_session_id": None},
+            "deviation_signals": [
+                {
+                    "name": "repeated_skip",
+                    "active": True,
+                    "severity": "medium",
+                    "summary": "skip",
+                    "count": 2,
+                    "threshold": 2,
+                    "evidence": [],
+                }
+            ],
+            "observations": ["keep focus"],
+        },
+    )
+    monkeypatch.setattr(retrospective, "get_intervention_level", lambda: "ASK")
+    monkeypatch.setattr(retrospective, "_build_confirmation_fingerprint", lambda raw: "gcf_trust")
+    monkeypatch.setattr(
+        retrospective,
+        "_guardian_thresholds",
+        lambda days: {
+            "repeated_skip": 2,
+            "l2_interruption": 1,
+            "stagnation_days": 3,
+            "l2_protection_high": 0.75,
+            "l2_protection_medium": 0.5,
+            "escalation_window_days": 7,
+            "escalation_firm_resistance": 2,
+            "escalation_periodic_resistance": 4,
+            "safe_mode_enabled": True,
+            "safe_mode_resistance_threshold": 5,
+            "safe_mode_min_response_events": 3,
+            "safe_mode_max_confirmation_ratio": 0.34,
+            "safe_mode_recovery_confirmations": 2,
+            "safe_mode_cooldown_hours": 24,
+            "reminder_budget_window_hours": 6,
+            "reminder_budget_max_prompts": 2,
+            "reminder_budget_enforce": True,
+            "trust_repair_window_hours": 48,
+            "trust_repair_negative_streak": 2,
+            "cadence_support_recovery_cooldown_hours": 8,
+            "cadence_override_cooldown_hours": 3,
+            "cadence_observe_cooldown_hours": 12,
+            "cadence_trust_repair_cooldown_hours": 1,
+        },
+    )
+    monkeypatch.setattr(
+        retrospective,
+        "load_events_for_period",
+        lambda days: [
+            {
+                "type": "guardian_intervention_responded",
+                "timestamp": "2026-02-11T11:10:00",
+                "payload": {
+                    "days": 7,
+                    "fingerprint": "gcf_trust",
+                    "action": "dismiss",
+                    "context": "instinct_escape",
+                },
+            },
+            {
+                "type": "guardian_autotune_rolled_back",
+                "timestamp": "2026-02-11T12:20:00",
+                "payload": {"proposal_id": "atp_1", "fingerprint": "gatfp_1"},
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        retrospective,
+        "_safe_mode_state_from_runtime",
+        lambda: {"active": False, "entered_at": None, "exited_at": None, "reason": None},
+    )
+
+    payload = retrospective.build_guardian_retrospective_response(days=7)
+    policy = payload["intervention_policy"]
+    trust_repair = policy["trust_repair"]
+
+    assert policy["mode"] == "trust_repair"
+    assert policy["intensity"] == "supportive"
+    assert trust_repair["active"] is True
+    assert trust_repair["negative_streak"] == 2
+    assert trust_repair["autotune_rollback_count"] == 1
+    assert payload["require_confirm"] is False
+    assert "Trust-repair mode is active" in payload["explainability"]["what_happens_next"]
 
 
 def test_intervention_policy_keeps_display_for_high_severity(monkeypatch):

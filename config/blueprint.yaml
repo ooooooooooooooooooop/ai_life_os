@@ -29,6 +29,29 @@ guardian_authority:
     max_confirmation_ratio: 0.34
     recovery_confirmations: 2
     cooldown_hours: 24
+  cadence:
+    reminder_budget_window_hours: 6
+    reminder_budget_max_prompts: 2
+    reminder_budget_enforce: true
+    support_recovery_cooldown_hours: 8
+    override_cooldown_hours: 3
+    observe_cooldown_hours: 12
+    trust_repair_window_hours: 48
+    trust_repair_negative_streak: 2
+    trust_repair_cooldown_hours: 12
+
+# Guardian boundary memory:
+# - reminder_frequency: low | balanced | high
+# - reminder_channel: in_app | digest | silent
+# - quiet_hours: optional low-disruption period; local timezone by default
+guardian_boundaries:
+  reminder_frequency: balanced
+  reminder_channel: in_app
+  quiet_hours:
+    enabled: true
+    start_hour: 22
+    end_hour: 8
+    timezone: local
 
 # Guardian auto-tuning:
 # - enabled: run proposal generation automatically during /sys/cycle.

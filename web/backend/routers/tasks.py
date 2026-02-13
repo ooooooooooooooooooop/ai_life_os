@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from core.event_sourcing import append_event, rebuild_state
 from core.goal_service import GoalService
 from core.models import TaskStatus
+from core.retrospective import build_guardian_retrospective_response
 from core.task_dispatcher import TaskDispatcher
 
 router = APIRouter()
@@ -85,10 +86,42 @@ def _find_task(state: Dict[str, Any], task_id: str):
     return None
 
 
-def _reschedule_overdue_tasks(state: Dict[str, Any], dispatcher: TaskDispatcher) -> Dict[str, Any]:
+def _guardian_dispatch_context(days: int = 7) -> Dict[str, Any]:
+    try:
+        retrospective = build_guardian_retrospective_response(days=days)
+    except Exception:
+        retrospective = {}
+    if not isinstance(retrospective, dict):
+        retrospective = {}
+
+    policy = retrospective.get("intervention_policy")
+    if not isinstance(policy, dict):
+        policy = {}
+    trust_repair = policy.get("trust_repair")
+    if not isinstance(trust_repair, dict):
+        trust_repair = {}
+
+    mode = str(policy.get("mode") or "").strip().lower()
+    trust_repair_active = mode == "trust_repair" or bool(trust_repair.get("active"))
+    repair_min_step = str(trust_repair.get("repair_min_step") or "").strip() or None
+    return {
+        "mode": mode or "balanced_intervention",
+        "low_pressure": trust_repair_active,
+        "prioritize_recovery": trust_repair_active,
+        "repair_min_step": repair_min_step,
+    }
+
+
+def _reschedule_overdue_tasks(
+    state: Dict[str, Any],
+    dispatcher: TaskDispatcher,
+    *,
+    low_pressure: bool = False,
+) -> Dict[str, Any]:
     updates = dispatcher.reschedule_overdue(
         state.get("tasks", []),
         active_goals_ids=_active_goal_ids(state),
+        low_pressure=low_pressure,
     )
     if not updates:
         return state
@@ -272,16 +305,30 @@ def _apply_recovery_batch_updates(state: Dict[str, Any]) -> Dict[str, Any]:
 @router.get("/current")
 def get_current_task():
     dispatcher = TaskDispatcher()
+    dispatch_context = _guardian_dispatch_context()
     state = rebuild_state()
-    state = _reschedule_overdue_tasks(state, dispatcher)
-    current_task = dispatcher.get_current_task(state.get("tasks", []))
+    state = _reschedule_overdue_tasks(
+        state,
+        dispatcher,
+        low_pressure=bool(dispatch_context.get("low_pressure")),
+    )
+    current_task = dispatcher.get_current_task(
+        state.get("tasks", []),
+        prioritize_recovery=bool(dispatch_context.get("prioritize_recovery")),
+    )
 
     if not current_task:
-        return {"task": None, "reason": "No pending tasks or all scheduled for future"}
+        payload = {"task": None, "reason": "No pending tasks or all scheduled for future"}
+        if dispatch_context.get("low_pressure"):
+            payload["dispatch_policy"] = dispatch_context
+        return payload
 
     result = current_task.__dict__.copy()
     result["goal_title"] = _resolve_goal_title(current_task.goal_id, state)
-    return {"task": result}
+    payload = {"task": result}
+    if dispatch_context.get("low_pressure"):
+        payload["dispatch_policy"] = dispatch_context
+    return payload
 
 
 @router.post("/{task_id}/complete")
@@ -376,8 +423,13 @@ def apply_recovery_batch():
 @router.get("/list")
 def list_tasks():
     dispatcher = TaskDispatcher()
+    dispatch_context = _guardian_dispatch_context()
     state = rebuild_state()
-    state = _reschedule_overdue_tasks(state, dispatcher)
+    state = _reschedule_overdue_tasks(
+        state,
+        dispatcher,
+        low_pressure=bool(dispatch_context.get("low_pressure")),
+    )
     tasks = state.get("tasks", [])
 
     pending = []

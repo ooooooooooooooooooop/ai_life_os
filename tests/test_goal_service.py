@@ -195,6 +195,15 @@ def test_state_endpoint_includes_stable_audit_shape(monkeypatch):
                 "recovery_adoption_rate": {"rate": 0.5},
                 "friction_load": {"score": 0.67, "level": "high"},
                 "support_vs_override": {"support_ratio": 0.4, "mode": "balanced"},
+                "trust_calibration": {
+                    "perceived_control_score": {"status": "ready", "score": 0.48},
+                    "interruption_burden_rate": {"status": "ready", "rate": 0.5},
+                    "recovery_time_to_resume_minutes": {
+                        "status": "unavailable",
+                        "reason": "no_l2_interrupt_resume_pair",
+                    },
+                    "mundane_time_saved_hours": {"status": "ready", "hours": 0.25},
+                },
             },
             "intervention_policy": {
                 "mode": "balanced_intervention",
@@ -234,6 +243,7 @@ def test_state_endpoint_includes_stable_audit_shape(monkeypatch):
     assert "retrospective.north_star_metrics" in payload["audit"]["used_state_fields"]
     assert "retrospective.intervention_policy" in payload["audit"]["used_state_fields"]
     assert "retrospective.blueprint_narrative" in payload["audit"]["used_state_fields"]
+    assert "guardian.boundaries" in payload["audit"]["used_state_fields"]
     assert set(payload["audit"]["decision_reason"]) == {"trigger", "constraint", "risk"}
     assert payload["guardian"]["intervention_level"] == "ASK"
     assert payload["guardian"]["pending_confirmation"] is True
@@ -249,10 +259,19 @@ def test_state_endpoint_includes_stable_audit_shape(monkeypatch):
     assert payload["guardian"]["metrics"]["recovery_adoption_rate"] == 0.5
     assert payload["guardian"]["metrics"]["friction_load"]["score"] == 0.67
     assert payload["guardian"]["metrics"]["support_vs_override"]["mode"] == "balanced"
+    assert payload["guardian"]["metrics"]["perceived_control_score"]["score"] == 0.48
+    assert payload["guardian"]["metrics"]["interruption_burden_rate"]["rate"] == 0.5
+    assert (
+        payload["guardian"]["metrics"]["recovery_time_to_resume_minutes"]["status"]
+        == "unavailable"
+    )
+    assert payload["guardian"]["metrics"]["mundane_time_saved_hours"]["hours"] == 0.25
     assert payload["guardian"]["metrics"]["north_star"]["window_days"] == 7
     assert payload["guardian"]["metrics"]["mundane_automation_coverage"] == 0.55
     assert payload["guardian"]["metrics"]["human_trust_index"] == 0.7
     assert payload["guardian"]["metrics"]["alignment_delta_weekly"] == 4.0
+    assert "boundaries" in payload["guardian"]
+    assert isinstance(payload["guardian"]["boundaries"], dict)
     assert "alignment" in payload
     assert "goal_summary" in payload["alignment"]
     assert payload["meta"]["event_schema_version"] == event_sourcing.EVENT_SCHEMA_VERSION
@@ -288,6 +307,66 @@ def test_get_guardian_autotune_config_defaults_when_file_missing(monkeypatch, tm
     assert config["auto_evaluate"]["horizon_hours"] == 48
     assert config["auto_evaluate"]["lookback_days"] == 90
     assert config["auto_evaluate"]["max_targets_per_cycle"] == 3
+
+
+def test_get_guardian_boundaries_config_defaults_when_file_missing(monkeypatch, tmp_path):
+    missing_path = tmp_path / "blueprint.yaml"
+    monkeypatch.setattr(api_router, "BLUEPRINT_CONFIG_PATH", missing_path)
+
+    payload = asyncio.run(api_router.get_guardian_boundaries_config())
+    config = payload["config"]
+
+    assert config["reminder_frequency"] == "balanced"
+    assert config["reminder_channel"] == "in_app"
+    assert config["quiet_hours"]["enabled"] is True
+    assert config["quiet_hours"]["start_hour"] == 22
+    assert config["quiet_hours"]["end_hour"] == 8
+    assert config["quiet_hours"]["timezone"] == "local"
+
+
+def test_update_guardian_boundaries_config_persists_and_emits_event(monkeypatch, tmp_path):
+    config_path = tmp_path / "blueprint.yaml"
+    config_path.write_text("intervention_level: SOFT\n", encoding="utf-8")
+    emitted = []
+
+    monkeypatch.setattr(api_router, "BLUEPRINT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(api_router, "append_event", lambda event: emitted.append(event))
+
+    req = api_router.GuardianBoundariesConfigUpdateRequest(
+        reminder_frequency="low",
+        reminder_channel="digest",
+        quiet_hours=api_router.GuardianBoundariesQuietHoursConfigRequest(
+            enabled=True,
+            start_hour=21,
+            end_hour=9,
+            timezone="Asia/Shanghai",
+        ),
+    )
+
+    payload = asyncio.run(api_router.update_guardian_boundaries_config(req))
+    assert payload["status"] == "updated"
+    assert payload["config"]["reminder_frequency"] == "low"
+    assert payload["config"]["reminder_channel"] == "digest"
+    assert payload["config"]["quiet_hours"]["start_hour"] == 21
+    assert emitted and emitted[0]["type"] == "guardian_boundaries_config_updated"
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["guardian_boundaries"]["reminder_frequency"] == "low"
+    assert saved["guardian_boundaries"]["reminder_channel"] == "digest"
+    assert saved["guardian_boundaries"]["quiet_hours"]["end_hour"] == 9
+
+
+def test_update_guardian_boundaries_config_rejects_invalid_frequency():
+    req = api_router.GuardianBoundariesConfigUpdateRequest(
+        reminder_frequency="extreme",
+        reminder_channel="in_app",
+    )
+    try:
+        asyncio.run(api_router.update_guardian_boundaries_config(req))
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+    else:
+        assert False, "Expected 400 when reminder_frequency is invalid"
 
 
 def test_update_guardian_autotune_config_persists_and_emits_event(monkeypatch, tmp_path):

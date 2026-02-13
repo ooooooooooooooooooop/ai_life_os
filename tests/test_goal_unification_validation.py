@@ -14,6 +14,7 @@ import core.snapshot_manager as snapshot_manager
 import core.strategic_engine.vision_inference as vision_inference
 import tools.migrate_goals_to_registry as migrate_tool
 import web.backend.routers.api as api_router
+import web.backend.routers.tasks as tasks_router
 from core.goal_inference import InferredGoal
 from core.goal_service import GoalService
 from core.objective_engine.models import GoalLayer, GoalSource, GoalState, ObjectiveNode
@@ -419,6 +420,78 @@ def test_tasks_current_reschedules_overdue_pending_task(client, isolated_runtime
         .get("updates", {})
         .get("scheduled_date")
         == date.today().isoformat()
+    )
+
+
+def test_tasks_current_uses_low_pressure_recovery_priority_in_trust_repair(
+    client,
+    isolated_runtime,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        tasks_router,
+        "build_guardian_retrospective_response",
+        lambda days=7: {
+            "intervention_policy": {
+                "mode": "trust_repair",
+                "trust_repair": {
+                    "active": True,
+                    "repair_min_step": "Take one 10-minute minimal step now.",
+                },
+            }
+        },
+    )
+
+    service = GoalService()
+    goal = service.create_node(
+        title="Trust Repair Goal",
+        layer=GoalLayer.GOAL,
+        state=GoalState.ACTIVE,
+        source=GoalSource.USER_INPUT.value,
+    )
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    normal_task = _task_payload("task_regular", goal.id, "09:00")
+    normal_task["scheduled_date"] = yesterday
+    recovery_task = _task_payload("task_regular_recovery", goal.id, "14:00")
+    recovery_task["scheduled_date"] = yesterday
+    event_sourcing.append_event({"type": "task_created", "payload": {"task": normal_task}})
+    event_sourcing.append_event({"type": "task_created", "payload": {"task": recovery_task}})
+
+    response = client.get("/api/v1/tasks/current")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["task"]["id"] == "task_regular_recovery"
+    assert payload["dispatch_policy"]["mode"] == "trust_repair"
+    assert payload["dispatch_policy"]["low_pressure"] is True
+    assert payload["dispatch_policy"]["prioritize_recovery"] is True
+    assert payload["dispatch_policy"]["repair_min_step"] == "Take one 10-minute minimal step now."
+
+    events = [
+        json.loads(line)
+        for line in isolated_runtime.event_log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    low_pressure_update = next(
+        e
+        for e in events
+        if e.get("type") == "task_updated"
+        and (e.get("payload") or {}).get("id") == "task_regular_recovery"
+        and ((e.get("payload") or {}).get("meta") or {}).get("reason")
+        == "overdue_reschedule_low_pressure"
+    )
+    assert low_pressure_update["payload"]["updates"]["scheduled_time"] == "Anytime"
+    assert (
+        (low_pressure_update.get("payload") or {})
+        .get("meta", {})
+        .get("low_pressure")
+        is True
+    )
+    assert not any(
+        e.get("type") == "task_updated"
+        and (e.get("payload") or {}).get("id") == "task_regular"
+        and ((e.get("payload") or {}).get("meta") or {}).get("reason")
+        == "overdue_reschedule_low_pressure"
+        for e in events
     )
 
 

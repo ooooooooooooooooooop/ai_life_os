@@ -62,3 +62,40 @@ def test_reschedule_overdue_uses_anytime_when_scheduled_time_missing():
 
     assert len(updates) == 1
     assert updates[0]["updates"]["scheduled_time"] == "Anytime"
+
+
+def test_reschedule_overdue_low_pressure_only_updates_recovery_tasks():
+    dispatcher = TaskDispatcher()
+    today = date.today()
+    tasks = [
+        _task("task_normal", "g1", today - timedelta(days=2), scheduled_time="09:00"),
+        _task("task_recovery", "g1", today - timedelta(days=1), scheduled_time="11:00"),
+    ]
+
+    updates = dispatcher.reschedule_overdue(
+        tasks,
+        active_goals_ids=["g1"],
+        low_pressure=True,
+    )
+
+    assert len(updates) == 1
+    assert updates[0]["id"] == "task_recovery"
+    assert updates[0]["updates"]["scheduled_date"] == today.isoformat()
+    assert updates[0]["updates"]["scheduled_time"] == "Anytime"
+    assert updates[0]["meta"]["reason"] == "overdue_reschedule_low_pressure"
+    assert updates[0]["meta"]["low_pressure"] is True
+
+
+def test_get_current_task_prioritizes_recovery_when_requested():
+    dispatcher = TaskDispatcher()
+    today = date.today()
+    tasks = [
+        _task("task_a", "g1", today, scheduled_time="08:00"),
+        _task("task_b_recovery", "g1", today, scheduled_time="Anytime"),
+        _task("task_c", "g1", today, scheduled_time="07:30"),
+    ]
+
+    current = dispatcher.get_current_task(tasks, prioritize_recovery=True)
+
+    assert current is not None
+    assert current.id == "task_b_recovery"

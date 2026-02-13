@@ -125,6 +125,11 @@ export default function Home() {
     const [guardianConfigSaving, setGuardianConfigSaving] = useState(false);
     const [guardianConfigDirty, setGuardianConfigDirty] = useState(false);
     const [guardianConfigSavedAt, setGuardianConfigSavedAt] = useState(null);
+    const [guardianBoundariesConfig, setGuardianBoundariesConfig] = useState(null);
+    const [guardianBoundariesLoading, setGuardianBoundariesLoading] = useState(false);
+    const [guardianBoundariesSaving, setGuardianBoundariesSaving] = useState(false);
+    const [guardianBoundariesDirty, setGuardianBoundariesDirty] = useState(false);
+    const [guardianBoundariesSavedAt, setGuardianBoundariesSavedAt] = useState(null);
     const [guardianAutotuneConfig, setGuardianAutotuneConfig] = useState(null);
     const [guardianAutotuneLifecycle, setGuardianAutotuneLifecycle] = useState(null);
     const [guardianAutotuneHistory, setGuardianAutotuneHistory] = useState([]);
@@ -180,6 +185,16 @@ export default function Home() {
         balanced: '支持/覆盖平衡',
         override_heavy: '覆盖优先',
         insufficient_data: '数据不足'
+    };
+    const boundaryFrequencyLabelMap = {
+        low: '低频',
+        balanced: '平衡',
+        high: '高频'
+    };
+    const boundaryChannelLabelMap = {
+        in_app: '应用内',
+        digest: '摘要',
+        silent: '静默'
     };
     const autotuneStatusLabelMap = {
         proposed: '已提议',
@@ -266,6 +281,8 @@ export default function Home() {
                 setAnchorSnapshot(s.anchor || null);
                 setAlignmentOverview(s.alignment?.goal_summary || null);
                 setWeeklyAlignmentTrend(s.alignment?.weekly_trend || null);
+                setGuardianBoundariesConfig(s.guardian?.boundaries || null);
+                setGuardianBoundariesDirty(false);
                 if (s.identity) {
                     setProfile({
                         occupation: s.identity.occupation ?? '',
@@ -286,6 +303,7 @@ export default function Home() {
                 setWeeklyAlignmentTrend(null);
                 setAnchorEffect(null);
                 setGuardianConfig(null);
+                setGuardianBoundariesConfig(null);
                 setGuardianAutotuneConfig(null);
                 setGuardianAutotuneLifecycle(null);
                 setGuardianAutotuneHistory([]);
@@ -313,6 +331,7 @@ export default function Home() {
                 retroRes,
                 effectRes,
                 guardianConfigRes,
+                guardianBoundariesRes,
                 autotuneLifecycleRes,
                 autotuneHistoryRes,
                 autotuneEvalLogsRes
@@ -322,6 +341,7 @@ export default function Home() {
                 api.get('/retrospective', { params: { days: 7 } }),
                 api.get('/anchor/effect'),
                 api.get('/guardian/config'),
+                api.get('/guardian/boundaries/config'),
                 api.get('/guardian/autotune/lifecycle/latest'),
                 api.get('/guardian/autotune/lifecycle/history', { params: { days: 14, limit: 12 } }),
                 api.get('/guardian/autotune/evaluation/logs', { params: { days: 14, limit: 8 } })
@@ -333,6 +353,10 @@ export default function Home() {
             if (guardianConfigRes.status === 'fulfilled') {
                 setGuardianConfig(guardianConfigRes.value.data?.config || null);
                 setGuardianConfigDirty(false);
+            }
+            if (guardianBoundariesRes.status === 'fulfilled') {
+                setGuardianBoundariesConfig(guardianBoundariesRes.value.data?.config || null);
+                setGuardianBoundariesDirty(false);
             }
             if (autotuneLifecycleRes.status === 'fulfilled') {
                 const payload = autotuneLifecycleRes.value.data || {};
@@ -653,6 +677,71 @@ export default function Home() {
             setError('保存 Guardian 阈值失败: ' + (e.response?.data?.detail || e.message));
         } finally {
             setGuardianConfigSaving(false);
+        }
+    };
+
+    const updateGuardianBoundariesField = (key, rawValue) => {
+        setGuardianBoundariesConfig((prev) => {
+            if (!prev) return prev;
+            return { ...prev, [key]: rawValue };
+        });
+        setGuardianBoundariesDirty(true);
+    };
+
+    const updateGuardianBoundariesQuietHoursField = (key, rawValue) => {
+        setGuardianBoundariesConfig((prev) => {
+            if (!prev) return prev;
+            return {
+                ...prev,
+                quiet_hours: {
+                    ...(prev.quiet_hours || {}),
+                    [key]: rawValue
+                }
+            };
+        });
+        setGuardianBoundariesDirty(true);
+    };
+
+    const refreshGuardianBoundariesConfig = async () => {
+        if (guardianBoundariesLoading) return;
+        try {
+            setGuardianBoundariesLoading(true);
+            const res = await api.get('/guardian/boundaries/config');
+            setGuardianBoundariesConfig(res.data?.config || null);
+            setGuardianBoundariesDirty(false);
+        } catch (e) {
+            console.error(e);
+            setError('刷新边界配置失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianBoundariesLoading(false);
+        }
+    };
+
+    const saveGuardianBoundariesConfig = async () => {
+        if (!guardianBoundariesConfig || guardianBoundariesSaving) return;
+        try {
+            setGuardianBoundariesSaving(true);
+            setError(null);
+            const payload = {
+                reminder_frequency: guardianBoundariesConfig?.reminder_frequency || 'balanced',
+                reminder_channel: guardianBoundariesConfig?.reminder_channel || 'in_app',
+                quiet_hours: {
+                    enabled: Boolean(guardianBoundariesConfig?.quiet_hours?.enabled ?? true),
+                    start_hour: Number(guardianBoundariesConfig?.quiet_hours?.start_hour ?? 22),
+                    end_hour: Number(guardianBoundariesConfig?.quiet_hours?.end_hour ?? 8),
+                    timezone: guardianBoundariesConfig?.quiet_hours?.timezone || 'local'
+                }
+            };
+            const res = await api.put('/guardian/boundaries/config', payload);
+            setGuardianBoundariesConfig(res.data?.config || guardianBoundariesConfig);
+            setGuardianBoundariesDirty(false);
+            setGuardianBoundariesSavedAt(new Date().toISOString());
+            await fetchAll();
+        } catch (e) {
+            console.error(e);
+            setError('保存边界配置失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setGuardianBoundariesSaving(false);
         }
     };
 
@@ -1040,8 +1129,30 @@ export default function Home() {
         : '--';
     const supportVsOverrideMode = supportVsOverrideMetric?.mode || 'insufficient_data';
     const supportVsOverrideModeLabel = supportModeLabelMap[supportVsOverrideMode] || supportVsOverrideMode;
+    const trustCalibrationMetrics = humanizationMetrics?.trust_calibration || {};
+    const perceivedControlMetric = trustCalibrationMetrics?.perceived_control_score || {};
+    const interruptionBurdenMetric = trustCalibrationMetrics?.interruption_burden_rate || {};
+    const recoveryToResumeMetric = trustCalibrationMetrics?.recovery_time_to_resume_minutes || {};
+    const mundaneSavedMetric = trustCalibrationMetrics?.mundane_time_saved_hours || {};
+    const perceivedControlScore = Number(perceivedControlMetric?.score);
+    const interruptionBurdenRate = Number(interruptionBurdenMetric?.rate);
+    const recoveryToResumeMinutes = Number(recoveryToResumeMetric?.median_minutes);
+    const mundaneSavedHours = Number(mundaneSavedMetric?.hours);
+    const perceivedControlLabel = Number.isFinite(perceivedControlScore)
+        ? `${Math.round(perceivedControlScore * 100)}%`
+        : '--';
+    const interruptionBurdenLabel = Number.isFinite(interruptionBurdenRate)
+        ? `${Math.round(interruptionBurdenRate * 100)}%`
+        : '--';
+    const recoveryToResumeLabel = Number.isFinite(recoveryToResumeMinutes)
+        ? `${Math.round(recoveryToResumeMinutes)} min`
+        : '--';
+    const mundaneSavedLabel = Number.isFinite(mundaneSavedHours)
+        ? `${mundaneSavedHours.toFixed(2)}h`
+        : '--';
     const interventionPolicy = retrospective?.intervention_policy || {};
     const interventionPolicyModeMap = {
+        trust_repair: '信任修复',
         support_recovery: '支持恢复',
         focused_override: '坚定纠偏',
         low_frequency_observe: '低频观察',
@@ -1057,6 +1168,9 @@ export default function Home() {
     const interventionCooldownLabel = interventionFrictionBudget?.cooldown_active
         ? `${interventionFrictionBudget.cooldown_remaining_minutes ?? 0} 分钟`
         : '无';
+    const trustRepairPolicy = interventionPolicy?.trust_repair || {};
+    const trustRepairActive = Boolean(trustRepairPolicy?.active);
+    const trustRepairMinStep = trustRepairPolicy?.repair_min_step || null;
     const northStarMetrics = retrospective?.north_star_metrics || {};
     const northStarTargets = northStarMetrics?.targets_met || {};
     const mundaneCoverageMetric = northStarMetrics?.mundane_automation_coverage || {};
@@ -1196,6 +1310,10 @@ export default function Home() {
     const blueprintDimensions = blueprintNarrative?.dimensions || {};
     const blueprintNarrativeCard = blueprintNarrative?.narrative_card || {};
     const pendingRecoveryCount = (tasks.pending || []).filter((task) => String(task?.id || '').endsWith('_recovery')).length;
+    const effectiveBoundaries = guardianBoundariesConfig || {};
+    const effectiveQuietHours = effectiveBoundaries?.quiet_hours || {};
+    const boundariesReminderFrequency = effectiveBoundaries?.reminder_frequency || 'balanced';
+    const boundariesReminderChannel = effectiveBoundaries?.reminder_channel || 'in_app';
 
     if (loading) {
         return (
@@ -1596,16 +1714,50 @@ export default function Home() {
                             <div style={{ marginTop: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
                                 提醒预算: {reminderWindowLabel} · 冷却: {interventionCooldownLabel}
                             </div>
-                            {interventionSuppressed && (
-                                <div style={{ marginTop: '0.2rem', fontSize: '0.72rem', color: '#fcd34d' }}>
-                                    当前轮次触发了摩擦预算，建议已暂缓展示。
-                                </div>
-                            )}
+                        {interventionSuppressed && (
+                            <div style={{ marginTop: '0.2rem', fontSize: '0.72rem', color: '#fcd34d' }}>
+                                当前轮次触发了摩擦预算，建议已暂缓展示。
+                            </div>
+                        )}
+                    </div>
+                    <div
+                        style={{
+                            marginBottom: '0.75rem',
+                            border: trustRepairActive
+                                ? '1px solid rgba(34, 197, 94, 0.45)'
+                                : '1px solid rgba(148, 163, 184, 0.3)',
+                            borderRadius: '8px',
+                            padding: '0.65rem 0.75rem',
+                            background: trustRepairActive
+                                ? 'rgba(34, 197, 94, 0.12)'
+                                : 'rgba(148, 163, 184, 0.08)'
+                        }}
+                    >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>信任修复回路</div>
+                            <div style={{ fontSize: '0.84rem', fontWeight: 600 }}>
+                                {trustRepairActive ? '激活中' : '未激活'}
+                            </div>
                         </div>
-                        {guardianSafeMode.enabled && (
-                            <div
-                                style={{
-                                    marginBottom: '0.75rem',
+                        <div style={{ marginTop: '0.22rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                            连续负反馈 {trustRepairPolicy?.negative_streak ?? 0}/{trustRepairPolicy?.negative_streak_threshold ?? '--'}
+                            · 窗口 {trustRepairPolicy?.window_hours ?? '--'}h
+                        </div>
+                        <div style={{ marginTop: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                            最近来源: {Array.isArray(trustRepairPolicy?.streak_sources) && trustRepairPolicy.streak_sources.length > 0
+                                ? trustRepairPolicy.streak_sources.join(' / ')
+                                : '无'}
+                        </div>
+                        {trustRepairMinStep && (
+                            <div style={{ marginTop: '0.24rem', fontSize: '0.72rem', color: '#86efac' }}>
+                                最小恢复步骤: {trustRepairMinStep}
+                            </div>
+                        )}
+                    </div>
+                    {guardianSafeMode.enabled && (
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
                                     border: guardianSafeMode.active
                                         ? '1px solid rgba(245, 158, 11, 0.45)'
                                         : '1px solid rgba(148, 163, 184, 0.3)',
@@ -1704,6 +1856,64 @@ export default function Home() {
                                     })}
                                 </div>
                             )}
+                        </div>
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Iteration 8 信任校准指标</div>
+                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    感知控制 · 打断负担 · 恢复时长 · 自动化节省
+                                </div>
+                            </div>
+                            <div style={{ marginTop: '0.5rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.5rem' }}>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>感知控制分数</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{perceivedControlLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        状态: {perceivedControlMetric?.status || 'unknown'}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {perceivedControlMetric?.reason || `支持占比 ${Math.round(Number(perceivedControlMetric?.support_ratio || 0) * 100)}%`}
+                                    </div>
+                                </div>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>高压打断负担</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{interruptionBurdenLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        {interruptionBurdenMetric?.high_intensity_count ?? 0}/{interruptionBurdenMetric?.total_interventions ?? 0}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {interruptionBurdenMetric?.reason || '值越低越好'}
+                                    </div>
+                                </div>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>中断恢复中位时长</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{recoveryToResumeLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        样本: {recoveryToResumeMetric?.samples ?? 0}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {recoveryToResumeMetric?.reason || '值越低越好'}
+                                    </div>
+                                </div>
+                                <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '0.45rem 0.5rem', background: 'rgba(2, 6, 23, 0.2)' }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>日常事务节省时长</div>
+                                    <div style={{ marginTop: '0.12rem', fontSize: '0.94rem', fontWeight: 700 }}>{mundaneSavedLabel}</div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
+                                        采纳 {mundaneSavedMetric?.adopted ?? 0}/{mundaneSavedMetric?.suggested ?? 0}
+                                    </div>
+                                    <div style={{ marginTop: '0.15rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                        {mundaneSavedMetric?.reason || `按每次 ${mundaneSavedMetric?.estimated_minutes_per_recovery ?? 15} 分钟估算`}
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                         <div
                             style={{
@@ -2157,6 +2367,123 @@ export default function Home() {
                             {guardianConfigSavedAt && (
                                 <div style={{ marginTop: '0.35rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
                                     上次保存: {guardianConfigSavedAt}
+                                </div>
+                            )}
+                        </div>
+
+                        <div
+                            style={{
+                                marginBottom: '0.75rem',
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                borderRadius: '8px',
+                                padding: '0.65rem 0.75rem',
+                                background: 'rgba(255,255,255,0.02)'
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Guardian 边界偏好</div>
+                                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={refreshGuardianBoundariesConfig}
+                                        disabled={guardianBoundariesLoading || guardianBoundariesSaving}
+                                        style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                    >
+                                        {guardianBoundariesLoading ? '刷新中...' : '刷新'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn btn-primary"
+                                        onClick={saveGuardianBoundariesConfig}
+                                        disabled={!guardianBoundariesDirty || guardianBoundariesSaving}
+                                        style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem' }}
+                                    >
+                                        {guardianBoundariesSaving ? '保存中...' : '保存边界'}
+                                    </button>
+                                </div>
+                            </div>
+                            {guardianBoundariesConfig ? (
+                                <>
+                                    <div style={{ marginTop: '0.5rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.45rem' }}>
+                                        <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            提醒频率
+                                            <select
+                                                value={effectiveBoundaries?.reminder_frequency || 'balanced'}
+                                                onChange={(e) => updateGuardianBoundariesField('reminder_frequency', e.target.value)}
+                                                style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                            >
+                                                <option value="low">low</option>
+                                                <option value="balanced">balanced</option>
+                                                <option value="high">high</option>
+                                            </select>
+                                        </label>
+                                        <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            提醒通道
+                                            <select
+                                                value={effectiveBoundaries?.reminder_channel || 'in_app'}
+                                                onChange={(e) => updateGuardianBoundariesField('reminder_channel', e.target.value)}
+                                                style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                            >
+                                                <option value="in_app">in_app</option>
+                                                <option value="digest">digest</option>
+                                                <option value="silent">silent</option>
+                                            </select>
+                                        </label>
+                                        <label style={{ display: 'flex', gap: '0.35rem', alignItems: 'center', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            <input
+                                                type="checkbox"
+                                                checked={Boolean(effectiveQuietHours?.enabled)}
+                                                onChange={(e) => updateGuardianBoundariesQuietHoursField('enabled', e.target.checked)}
+                                            />
+                                            启用安静时段
+                                        </label>
+                                        <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            安静开始小时
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                max="23"
+                                                value={effectiveQuietHours?.start_hour ?? 22}
+                                                onChange={(e) => updateGuardianBoundariesQuietHoursField('start_hour', e.target.value)}
+                                                style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                            />
+                                        </label>
+                                        <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            安静结束小时
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                max="23"
+                                                value={effectiveQuietHours?.end_hour ?? 8}
+                                                onChange={(e) => updateGuardianBoundariesQuietHoursField('end_hour', e.target.value)}
+                                                style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                            />
+                                        </label>
+                                        <label style={{ display: 'grid', gap: '0.2rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                            时区
+                                            <input
+                                                type="text"
+                                                value={effectiveQuietHours?.timezone || 'local'}
+                                                onChange={(e) => updateGuardianBoundariesQuietHoursField('timezone', e.target.value)}
+                                                style={{ borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(0,0,0,0.25)', color: 'white', padding: '0.25rem 0.35rem' }}
+                                            />
+                                        </label>
+                                    </div>
+                                    <div style={{ marginTop: '0.35rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        当前策略: {boundaryFrequencyLabelMap[boundariesReminderFrequency] || boundariesReminderFrequency}
+                                        · {boundaryChannelLabelMap[boundariesReminderChannel] || boundariesReminderChannel}
+                                        · 安静时段 {effectiveQuietHours?.enabled ? `${effectiveQuietHours?.start_hour ?? '--'}:00-${effectiveQuietHours?.end_hour ?? '--'}:00` : '关闭'}
+                                    </div>
+                                </>
+                            ) : (
+                                <div style={{ marginTop: '0.45rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                    当前无法加载边界配置，点击“刷新”重试。
+                                </div>
+                            )}
+                            {guardianBoundariesSavedAt && (
+                                <div style={{ marginTop: '0.35rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                    上次保存: {guardianBoundariesSavedAt}
                                 </div>
                             )}
                         </div>

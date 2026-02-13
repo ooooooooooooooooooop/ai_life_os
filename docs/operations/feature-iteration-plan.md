@@ -253,3 +253,22 @@ Iteration 6 已把 autotune 从“仅提议（shadow）”升级为“可治理�
 - 控制：提供“推荐模板 + 一键恢复默认”，默认保持低配置负担。
 - 风险：过度降级可能削弱关键干预效果。
 - 控制：仅在“连续拒绝/回滚”窗口触发降级，且保留 L2 关键保护下限。
+
+### 当前进展（2026-02-12）
+- 已落地边界记忆配置接口：`GET/PUT /api/v1/guardian/boundaries/config`。
+- 已新增配置持久化节点 `guardian_boundaries`（提醒频率/提醒通道/安静时段）。
+- `/state` 已投影 `guardian.boundaries`，并补充审计字段 `guardian.boundaries`。
+- 已补充回归测试（defaults / 持久化 / 非法参数校验）与运行文档说明。
+- 已落地“信任修复回路”：连续 `dismiss/reject/rollback` 触发 `trust_repair` 低压模式。
+- `intervention_policy` 新增 `trust_repair` 结构化状态与 `repair_min_step` 最小恢复步骤。
+- `ASK` 场景在 `trust_repair` 下自动降级为非强确认，降低“被系统施压”体感。
+- Home 已支持 `trust_repair` 模式标签展示，复盘解释文案可输出修复引导。
+- 已落地低压任务重排：`trust_repair` 下仅重排恢复任务并优先派发最小恢复任务（`_recovery`）。
+- `/tasks/current` 新增 `dispatch_policy` 回传，包含 `low_pressure/prioritize_recovery/repair_min_step`。
+- `/retrospective` 的 `humanization_metrics` 新增 `trust_calibration` 指标包，覆盖：
+  - `perceived_control_score`
+  - `interruption_burden_rate`
+  - `recovery_time_to_resume_minutes`
+  - `mundane_time_saved_hours`
+- `/state` 已投影上述 trust-calibration 指标，并保留无数据场景 `status/reason`。
+- Home 已新增边界偏好设置面板（频率/通道/安静时段）与 Iteration 8 指标卡片展示。

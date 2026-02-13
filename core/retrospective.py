@@ -12,6 +12,7 @@ import hashlib
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
+from statistics import median
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
@@ -57,6 +58,9 @@ L2_SESSION_RESUME_HINTS = {
         "Restart with a minimal next step and protect the next 10 minutes from context switching."
     ),
 }
+AUTOTUNE_EVENT_REJECTED = "guardian_autotune_rejected"
+AUTOTUNE_EVENT_ROLLED_BACK = "guardian_autotune_rolled_back"
+AUTOTUNE_EVENT_APPLIED = "guardian_autotune_applied"
 
 
 def load_events_for_period(days: int = 7) -> List[Dict[str, Any]]:
@@ -355,9 +359,12 @@ def _guardian_thresholds(days: int) -> Dict[str, Any]:
         "reminder_budget_window_hours": 6,
         "reminder_budget_max_prompts": 2,
         "reminder_budget_enforce": True,
+        "trust_repair_window_hours": 48,
+        "trust_repair_negative_streak": 2,
         "cadence_support_recovery_cooldown_hours": 8,
         "cadence_override_cooldown_hours": 3,
         "cadence_observe_cooldown_hours": 12,
+        "cadence_trust_repair_cooldown_hours": 12,
     }
 
     blueprint_config = _load_blueprint_config()
@@ -489,6 +496,18 @@ def _guardian_thresholds(days: int) -> Dict[str, Any]:
         cadence_raw.get("reminder_budget_enforce"),
         defaults["reminder_budget_enforce"],
     )
+    trust_repair_window_hours = _coerce_int(
+        cadence_raw.get("trust_repair_window_hours"),
+        default=defaults["trust_repair_window_hours"],
+        min_value=1,
+        max_value=336,
+    )
+    trust_repair_negative_streak = _coerce_int(
+        cadence_raw.get("trust_repair_negative_streak"),
+        default=defaults["trust_repair_negative_streak"],
+        min_value=1,
+        max_value=20,
+    )
     cadence_support_recovery_cooldown_hours = _coerce_int(
         cadence_raw.get("support_recovery_cooldown_hours"),
         default=defaults["cadence_support_recovery_cooldown_hours"],
@@ -504,6 +523,12 @@ def _guardian_thresholds(days: int) -> Dict[str, Any]:
     cadence_observe_cooldown_hours = _coerce_int(
         cadence_raw.get("observe_cooldown_hours"),
         default=defaults["cadence_observe_cooldown_hours"],
+        min_value=1,
+        max_value=168,
+    )
+    cadence_trust_repair_cooldown_hours = _coerce_int(
+        cadence_raw.get("trust_repair_cooldown_hours"),
+        default=defaults["cadence_trust_repair_cooldown_hours"],
         min_value=1,
         max_value=168,
     )
@@ -526,9 +551,12 @@ def _guardian_thresholds(days: int) -> Dict[str, Any]:
         "reminder_budget_window_hours": reminder_budget_window_hours,
         "reminder_budget_max_prompts": reminder_budget_max_prompts,
         "reminder_budget_enforce": reminder_budget_enforce,
+        "trust_repair_window_hours": trust_repair_window_hours,
+        "trust_repair_negative_streak": trust_repair_negative_streak,
         "cadence_support_recovery_cooldown_hours": cadence_support_recovery_cooldown_hours,
         "cadence_override_cooldown_hours": cadence_override_cooldown_hours,
         "cadence_observe_cooldown_hours": cadence_observe_cooldown_hours,
+        "cadence_trust_repair_cooldown_hours": cadence_trust_repair_cooldown_hours,
     }
 
 
@@ -2050,6 +2078,150 @@ def _find_confirmation_event(
     return normalized["event"] if normalized else None
 
 
+def _l2_resume_recovery_minutes(events: List[Dict[str, Any]]) -> List[int]:
+    lifecycle: List[Tuple[datetime, str, str]] = []
+    for event in events:
+        event_type = str(event.get("type") or "").strip().lower()
+        if event_type not in {
+            "l2_session_interrupted",
+            "l2_session_resumed",
+            "l2_session_completed",
+        }:
+            continue
+        parsed_time = _parse_event_time(event)
+        if not parsed_time:
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        session_id = str(payload.get("session_id") or "").strip()
+        if not session_id:
+            continue
+        lifecycle.append((parsed_time, event_type, session_id))
+
+    lifecycle.sort(key=lambda item: item[0])
+    interrupted_at: Dict[str, datetime] = {}
+    recovery_minutes: List[int] = []
+    for parsed_time, event_type, session_id in lifecycle:
+        if event_type == "l2_session_interrupted":
+            interrupted_at[session_id] = parsed_time
+            continue
+        interrupted_time = interrupted_at.pop(session_id, None)
+        if interrupted_time is None or parsed_time < interrupted_time:
+            continue
+        minutes = int(round((parsed_time - interrupted_time).total_seconds() / 60.0))
+        recovery_minutes.append(max(0, minutes))
+
+    return recovery_minutes
+
+
+def _guardian_trust_calibration_metrics(
+    *,
+    events: List[Dict[str, Any]],
+    days: int,
+    support_ratio: Optional[float],
+    support_count: int,
+    override_count: int,
+    recovery_adopted: int,
+    recovery_suggested: int,
+) -> Dict[str, Any]:
+    responses = _iter_guardian_response_events(events, days=days)
+    total_interventions = len(responses)
+    high_intensity_count = sum(
+        1
+        for entry in responses
+        if entry.get("context") == "instinct_escape"
+        or entry.get("action") == "dismiss"
+    )
+
+    if total_interventions > 0 and isinstance(support_ratio, (int, float)):
+        interruption_burden_rate = round(high_intensity_count / total_interventions, 2)
+        perceived_control_score = round(
+            (0.7 * float(support_ratio)) + (0.3 * (1 - interruption_burden_rate)),
+            2,
+        )
+        perceived_control = {
+            "status": "ready",
+            "reason": "",
+            "score": perceived_control_score,
+            "support_ratio": round(float(support_ratio), 2),
+            "support_count": support_count,
+            "override_count": override_count,
+            "high_intensity_ratio": interruption_burden_rate,
+        }
+        interruption_burden = {
+            "status": "ready",
+            "reason": "",
+            "rate": interruption_burden_rate,
+            "high_intensity_count": high_intensity_count,
+            "total_interventions": total_interventions,
+        }
+    else:
+        perceived_control = {
+            "status": "unavailable",
+            "reason": "no_guardian_response_data",
+            "score": None,
+            "support_ratio": None,
+            "support_count": support_count,
+            "override_count": override_count,
+            "high_intensity_ratio": None,
+        }
+        interruption_burden = {
+            "status": "unavailable",
+            "reason": "no_guardian_response_data",
+            "rate": None,
+            "high_intensity_count": high_intensity_count,
+            "total_interventions": total_interventions,
+        }
+
+    recovery_minutes = _l2_resume_recovery_minutes(events)
+    if recovery_minutes:
+        recovery_time_to_resume = {
+            "status": "ready",
+            "reason": "",
+            "median_minutes": int(round(median(recovery_minutes))),
+            "samples": len(recovery_minutes),
+            "values_minutes": recovery_minutes,
+        }
+    else:
+        recovery_time_to_resume = {
+            "status": "unavailable",
+            "reason": "no_l2_interrupt_resume_pair",
+            "median_minutes": None,
+            "samples": 0,
+            "values_minutes": [],
+        }
+
+    estimated_minutes_per_recovery = 15
+    if recovery_suggested > 0:
+        mundane_hours = round(
+            (max(0, recovery_adopted) * estimated_minutes_per_recovery) / 60.0,
+            2,
+        )
+        mundane_time_saved = {
+            "status": "ready",
+            "reason": "",
+            "hours": mundane_hours,
+            "adopted": max(0, recovery_adopted),
+            "suggested": max(0, recovery_suggested),
+            "estimated_minutes_per_recovery": estimated_minutes_per_recovery,
+        }
+    else:
+        mundane_time_saved = {
+            "status": "unavailable",
+            "reason": "no_recovery_opportunities",
+            "hours": None,
+            "adopted": max(0, recovery_adopted),
+            "suggested": max(0, recovery_suggested),
+            "estimated_minutes_per_recovery": estimated_minutes_per_recovery,
+        }
+
+    return {
+        "perceived_control_score": perceived_control,
+        "interruption_burden_rate": interruption_burden,
+        "recovery_time_to_resume_minutes": recovery_time_to_resume,
+        "mundane_time_saved_hours": mundane_time_saved,
+    }
+
+
 def _guardian_humanization_metrics(
     *,
     events: List[Dict[str, Any]],
@@ -2185,6 +2357,16 @@ def _guardian_humanization_metrics(
         support_mode = "override_heavy"
         support_summary = "Guardian interactions are mostly override-oriented."
 
+    trust_calibration = _guardian_trust_calibration_metrics(
+        events=events,
+        days=days,
+        support_ratio=support_ratio,
+        support_count=support_count,
+        override_count=override_count,
+        recovery_adopted=recovery_adopted,
+        recovery_suggested=recovery_suggested,
+    )
+
     return {
         "recovery_adoption_rate": {
             "rate": recovery_rate,
@@ -2224,6 +2406,7 @@ def _guardian_humanization_metrics(
             "mode": support_mode,
             "summary": support_summary,
         },
+        "trust_calibration": trust_calibration,
     }
 
 
@@ -2647,6 +2830,152 @@ def _highest_signal_severity(suggestion_sources: List[Dict[str, Any]]) -> str:
     return highest
 
 
+def _guardian_trust_repair_signal(
+    *,
+    events: List[Dict[str, Any]],
+    days: int,
+    now: datetime,
+    thresholds: Dict[str, Any],
+) -> Dict[str, Any]:
+    window_hours = _coerce_int(
+        thresholds.get("trust_repair_window_hours"),
+        default=48,
+        min_value=1,
+        max_value=336,
+    )
+    negative_streak_threshold = _coerce_int(
+        thresholds.get("trust_repair_negative_streak"),
+        default=2,
+        min_value=1,
+        max_value=20,
+    )
+    window_start = now - timedelta(hours=window_hours)
+
+    timeline: List[Dict[str, Any]] = []
+    dismiss_count = 0
+    autotune_reject_count = 0
+    autotune_rollback_count = 0
+
+    for entry in _iter_guardian_response_events(events, days=days):
+        parsed_time = entry.get("parsed_time")
+        if not parsed_time or parsed_time < window_start:
+            continue
+        action = str(entry.get("action") or "").strip().lower()
+        if action == "dismiss":
+            dismiss_count += 1
+            timeline.append(
+                {
+                    "parsed_time": parsed_time,
+                    "outcome": "negative",
+                    "source": "guardian_dismiss",
+                    "timestamp": entry.get("timestamp"),
+                }
+            )
+        elif action == "confirm":
+            timeline.append(
+                {
+                    "parsed_time": parsed_time,
+                    "outcome": "positive",
+                    "source": "guardian_confirm",
+                    "timestamp": entry.get("timestamp"),
+                }
+            )
+        elif action == "snooze":
+            timeline.append(
+                {
+                    "parsed_time": parsed_time,
+                    "outcome": "neutral",
+                    "source": "guardian_snooze",
+                    "timestamp": entry.get("timestamp"),
+                }
+            )
+
+    for event in events:
+        parsed_time = _parse_event_time(event)
+        if not parsed_time or parsed_time < window_start:
+            continue
+        event_type = str(event.get("type") or "").strip().lower()
+        if event_type == AUTOTUNE_EVENT_REJECTED:
+            autotune_reject_count += 1
+            timeline.append(
+                {
+                    "parsed_time": parsed_time,
+                    "outcome": "negative",
+                    "source": "autotune_rejected",
+                    "timestamp": event.get("timestamp"),
+                }
+            )
+        elif event_type == AUTOTUNE_EVENT_ROLLED_BACK:
+            autotune_rollback_count += 1
+            timeline.append(
+                {
+                    "parsed_time": parsed_time,
+                    "outcome": "negative",
+                    "source": "autotune_rolled_back",
+                    "timestamp": event.get("timestamp"),
+                }
+            )
+        elif event_type == AUTOTUNE_EVENT_APPLIED:
+            timeline.append(
+                {
+                    "parsed_time": parsed_time,
+                    "outcome": "positive",
+                    "source": "autotune_applied",
+                    "timestamp": event.get("timestamp"),
+                }
+            )
+
+    timeline.sort(key=lambda item: item.get("parsed_time") or datetime.min)
+    negative_streak = 0
+    last_negative_at = None
+    streak_sources: List[str] = []
+    for item in reversed(timeline):
+        outcome = str(item.get("outcome") or "").strip().lower()
+        if outcome != "negative":
+            break
+        negative_streak += 1
+        streak_sources.append(str(item.get("source") or "unknown"))
+        if last_negative_at is None:
+            last_negative_at = item.get("timestamp")
+
+    active = negative_streak >= negative_streak_threshold
+    if active:
+        if autotune_rollback_count > 0:
+            repair_min_step = (
+                "Freeze threshold changes for one cycle and review the rollback reason "
+                "before any new apply."
+            )
+        elif dismiss_count >= negative_streak_threshold:
+            repair_min_step = (
+                "Switch to one low-pressure supportive prompt and execute one "
+                "10-minute minimal next step."
+            )
+        else:
+            repair_min_step = (
+                "Use one supportive prompt and delay further override actions "
+                "until the next evidence window."
+            )
+        reason = "consecutive_rejection_or_rollback"
+    else:
+        repair_min_step = None
+        reason = ""
+
+    return {
+        "active": active,
+        "reason": reason,
+        "window_hours": window_hours,
+        "negative_streak": negative_streak,
+        "negative_streak_threshold": negative_streak_threshold,
+        "recent_signal_count": len(timeline),
+        "dismiss_count": dismiss_count,
+        "autotune_reject_count": autotune_reject_count,
+        "autotune_rollback_count": autotune_rollback_count,
+        "last_negative_at": last_negative_at,
+        "streak_sources": list(reversed(streak_sources)),
+        "repair_min_step": repair_min_step,
+    }
+
+
 def _guardian_policy_mode(
     *,
     latest_context: Optional[str],
@@ -2663,6 +2992,11 @@ def _guardian_policy_mode(
 
 
 def _policy_mode_reason(mode: str, latest_context: Optional[str], highest_severity: str) -> str:
+    if mode == "trust_repair":
+        return (
+            "Consecutive rejection/rollback was detected, "
+            "so Guardian temporarily switches to trust-repair cadence."
+        )
     if mode == "support_recovery":
         return (
             "Latest response context indicates recovery or blocker removal, "
@@ -2680,6 +3014,13 @@ def _policy_mode_reason(mode: str, latest_context: Optional[str], highest_severi
 
 
 def _policy_cooldown_hours(mode: str, thresholds: Dict[str, Any]) -> int:
+    if mode == "trust_repair":
+        return _coerce_int(
+            thresholds.get("cadence_trust_repair_cooldown_hours"),
+            default=12,
+            min_value=1,
+            max_value=168,
+        )
     if mode == "focused_override":
         return _coerce_int(
             thresholds.get("cadence_override_cooldown_hours"),
@@ -2713,10 +3054,19 @@ def _guardian_intervention_policy(
     display: bool,
     require_confirm: bool,
 ) -> Dict[str, Any]:
-    mode = _guardian_policy_mode(
-        latest_context=latest_context,
-        suggestion_sources=suggestion_sources,
+    trust_repair = _guardian_trust_repair_signal(
+        events=events,
+        days=days,
+        now=now,
+        thresholds=thresholds,
     )
+    if trust_repair.get("active"):
+        mode = "trust_repair"
+    else:
+        mode = _guardian_policy_mode(
+            latest_context=latest_context,
+            suggestion_sources=suggestion_sources,
+        )
     highest_severity = _highest_signal_severity(suggestion_sources)
     reason = _policy_mode_reason(mode, latest_context, highest_severity)
 
@@ -2758,7 +3108,10 @@ def _guardian_intervention_policy(
                 max(0, (cooldown_ends_at - now).total_seconds() // 60)
             )
 
-    high_priority = mode == "focused_override" or highest_severity == "high"
+    high_priority = (
+        mode == "focused_override"
+        or (highest_severity == "high" and mode != "trust_repair")
+    )
     suppressed = (
         display
         and not high_priority
@@ -2776,8 +3129,12 @@ def _guardian_intervention_policy(
 
     effective_display = display and not suppressed
     effective_require_confirm = require_confirm and effective_display
+    if mode == "trust_repair":
+        effective_require_confirm = False
 
-    if mode == "focused_override":
+    if mode == "trust_repair":
+        intensity = "supportive"
+    elif mode == "focused_override":
         intensity = "firm"
     elif mode == "support_recovery":
         intensity = "supportive"
@@ -2803,6 +3160,7 @@ def _guardian_intervention_policy(
         },
         "effective_display": effective_display,
         "effective_require_confirm": effective_require_confirm,
+        "trust_repair": trust_repair,
     }
 
 
@@ -2843,6 +3201,20 @@ def _build_guardian_explainability(
         what_happens_next = (
             "Guardian keeps observing rhythm and deviations for the next cycle."
         )
+    elif isinstance(intervention_policy, dict) and isinstance(
+        intervention_policy.get("trust_repair"),
+        dict,
+    ) and intervention_policy["trust_repair"].get("active"):
+        repair_min_step = str(
+            intervention_policy["trust_repair"].get("repair_min_step") or ""
+        ).strip()
+        if repair_min_step:
+            what_happens_next = f"Trust-repair mode is active. Minimal next step: {repair_min_step}"
+        else:
+            what_happens_next = (
+                "Trust-repair mode is active. Guardian will lower pressure and "
+                "wait for fresh evidence."
+            )
     elif require_confirm:
         what_happens_next = (
             "ASK mode is active: confirm this suggestion or respond with context."
@@ -2970,6 +3342,10 @@ def build_guardian_retrospective_response(days: int = 7) -> Dict[str, Any]:
     display = bool(intervention_policy.get("effective_display", False)) and bool(suggestion)
     if not display:
         suggestion = ""
+    effective_confirmation_required = bool(
+        intervention_policy.get("effective_require_confirm", False)
+    )
+    require_confirm = effective_confirmation_required and not confirmed
 
     latest_response_payload = (
         {
@@ -2996,7 +3372,7 @@ def build_guardian_retrospective_response(days: int = 7) -> Dict[str, Any]:
     raw["intervention_policy"] = intervention_policy
     raw["response_action"] = {
         "required": confirmation_required,
-        "pending": confirmation_required and not confirmed,
+        "pending": require_confirm,
         "allowed_actions": allowed_actions,
         "allowed_contexts": allowed_contexts,
         "context_options": context_options,
