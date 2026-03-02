@@ -289,9 +289,12 @@ def normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
     Normalize an event to the canonical shape.
     """
     normalized = dict(event)
-    normalized.setdefault("timestamp", datetime.now().isoformat())
-    normalized.setdefault("schema_version", EVENT_SCHEMA_VERSION)
-    normalized.setdefault("event_id", f"evt_{uuid4().hex[:12]}")
+    if not normalized.get("timestamp"):
+        normalized["timestamp"] = datetime.now().isoformat()
+    if not normalized.get("schema_version"):
+        normalized["schema_version"] = EVENT_SCHEMA_VERSION
+    if not normalized.get("event_id"):
+        normalized["event_id"] = f"evt_{uuid4().hex[:12]}"
     return normalized
 
 
@@ -301,6 +304,10 @@ def append_event(event: Dict[str, Any]) -> None:
     After append: time_tick -> create_snapshot(force=True); else -> create_snapshot() if interval.
     """
     normalized_event = normalize_event(event)
+    shape = validate_event_shape(normalized_event, strict=True)
+    if not shape["valid"]:
+        missing = ", ".join(shape["missing"])
+        raise ValueError(f"Event missing required fields: {missing}")
 
     EVENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 

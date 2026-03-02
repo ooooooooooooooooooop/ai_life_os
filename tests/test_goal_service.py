@@ -208,6 +208,32 @@ def test_state_endpoint_includes_stable_audit_shape(monkeypatch):
             "intervention_policy": {
                 "mode": "balanced_intervention",
                 "reason": "Medium-severity deviation is active, so Guardian uses balanced cadence.",
+                "policy_version": "guardian_policy_v1_evidence_loop",
+                "evidence": {
+                    "window_days": 7,
+                    "active_signal_count": 0,
+                    "active_signals": [],
+                    "response_events": {
+                        "total": 0,
+                        "action_counts": {"confirm": 0, "snooze": 0, "dismiss": 0, "unknown": 0},
+                        "context_counts": {
+                            "recovering": 0,
+                            "resource_blocked": 0,
+                            "task_too_big": 0,
+                            "instinct_escape": 0,
+                            "unknown": 0,
+                        },
+                    },
+                    "trust_repair": {
+                        "active": False,
+                        "reason": "",
+                        "negative_streak": 0,
+                        "negative_streak_threshold": 2,
+                        "recent_signal_count": 0,
+                        "last_negative_at": None,
+                        "streak_sources": [],
+                    },
+                },
                 "friction_budget": {"suppressed": False},
             },
             "north_star_metrics": {
@@ -259,6 +285,10 @@ def test_state_endpoint_includes_stable_audit_shape(monkeypatch):
     assert payload["guardian"]["metrics"]["recovery_adoption_rate"] == 0.5
     assert payload["guardian"]["metrics"]["friction_load"]["score"] == 0.67
     assert payload["guardian"]["metrics"]["support_vs_override"]["mode"] == "balanced"
+    assert payload["guardian"]["policy_version"] == "guardian_policy_v1_evidence_loop"
+    assert payload["guardian"]["policy_evidence"]["window_days"] == 7
+    assert payload["guardian"]["metrics"]["policy_version"] == "guardian_policy_v1_evidence_loop"
+    assert payload["guardian"]["metrics"]["policy_evidence"]["active_signal_count"] == 0
     assert payload["guardian"]["metrics"]["perceived_control_score"]["score"] == 0.48
     assert payload["guardian"]["metrics"]["interruption_burden_rate"]["rate"] == 0.5
     assert (

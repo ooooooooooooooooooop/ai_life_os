@@ -230,20 +230,21 @@ def test_guardian_l2_protection_ratio_uses_deep_work_l2_events(monkeypatch):
             {"t1": "g_l2", "t2": "g_l2", "t3": "g_l1"},
         ),
     )
+    today = datetime.now().strftime("%Y-%m-%d")
     events = [
         {
             "type": "task_updated",
-            "timestamp": "2026-02-10T10:00:00",
+            "timestamp": f"{today}T10:00:00",
             "payload": {"id": "t1", "updates": {"status": "completed"}},
         },
         {
             "type": "task_updated",
-            "timestamp": "2026-02-10T10:20:00",
+            "timestamp": f"{today}T10:20:00",
             "payload": {"id": "t2", "updates": {"status": "skipped"}},
         },
         {
             "type": "task_updated",
-            "timestamp": "2026-02-10T15:20:00",
+            "timestamp": f"{today}T15:20:00",
             "payload": {"id": "t3", "updates": {"status": "completed"}},
         },
     ]
@@ -305,20 +306,21 @@ def test_guardian_l2_protection_uses_ratio_threshold_config(monkeypatch):
         "l2_protection_high": 0.9,
         "l2_protection_medium": 0.6,
     }
+    today = datetime.now().strftime("%Y-%m-%d")
     events = [
         {
             "type": "task_updated",
-            "timestamp": "2026-02-10T10:00:00",
+            "timestamp": f"{today}T10:00:00",
             "payload": {"id": "t1", "updates": {"status": "completed"}},
         },
         {
             "type": "task_updated",
-            "timestamp": "2026-02-10T10:20:00",
+            "timestamp": f"{today}T10:20:00",
             "payload": {"id": "t2", "updates": {"status": "completed"}},
         },
         {
             "type": "task_updated",
-            "timestamp": "2026-02-10T10:30:00",
+            "timestamp": f"{today}T10:30:00",
             "payload": {"id": "t3", "updates": {"status": "skipped"}},
         },
     ]
@@ -328,6 +330,28 @@ def test_guardian_l2_protection_uses_ratio_threshold_config(monkeypatch):
     assert payload["level"] == "medium"
     assert payload["thresholds"]["high"] == 0.9
     assert payload["thresholds"]["medium"] == 0.6
+
+
+def test_guardian_l2_protection_keeps_recent_window_when_events_are_stale(monkeypatch):
+    monkeypatch.setattr(
+        retrospective,
+        "_build_l2_reference_maps",
+        lambda: ({"g_l2": "L2_FLOURISHING"}, {"t1": "g_l2"}),
+    )
+    events = [
+        {
+            "type": "task_updated",
+            "timestamp": "2026-01-01T10:00:00",
+            "payload": {"id": "t1", "updates": {"status": "completed"}},
+        }
+    ]
+
+    payload = retrospective._guardian_l2_protection(events, days=7)
+    trend = payload["trend"]
+
+    assert len(trend) == 7
+    today = datetime.now().strftime("%Y-%m-%d")
+    assert trend[-1]["date"] == today
 
 
 def test_build_response_includes_suggestion_sources_for_active_signals(monkeypatch):
@@ -886,6 +910,173 @@ def test_humanization_metrics_trust_calibration_returns_unavailable_without_data
     assert trust_calibration["interruption_burden_rate"]["status"] == "unavailable"
     assert trust_calibration["recovery_time_to_resume_minutes"]["status"] == "unavailable"
     assert trust_calibration["mundane_time_saved_hours"]["status"] == "unavailable"
+
+
+def test_build_response_policy_includes_evidence_loop_payload(monkeypatch):
+    monkeypatch.setattr(
+        retrospective,
+        "generate_guardian_retrospective",
+        lambda days: {
+            "period": {"days": days, "start_date": "2026-02-01", "end_date": "2026-02-07"},
+            "generated_at": "2026-02-11T12:00:00",
+            "rhythm": {"broken": False, "summary": "ok"},
+            "alignment": {"deviated": False, "summary": "ok"},
+            "friction": {"repeated_skip": True, "delay_signals": False, "summary": "friction"},
+            "l2_protection": {"ratio": 0.5, "level": "medium", "summary": "moderate"},
+            "l2_session": {"active_session": False, "active_session_id": None},
+            "deviation_signals": [
+                {
+                    "name": "repeated_skip",
+                    "active": True,
+                    "severity": "medium",
+                    "summary": "skip",
+                    "count": 2,
+                    "threshold": 2,
+                    "evidence": [],
+                }
+            ],
+            "observations": ["keep focus"],
+        },
+    )
+    monkeypatch.setattr(retrospective, "get_intervention_level", lambda: "SOFT")
+    monkeypatch.setattr(retrospective, "_build_confirmation_fingerprint", lambda raw: "gcf_evidence")
+    monkeypatch.setattr(
+        retrospective,
+        "_guardian_thresholds",
+        lambda days: {
+            "repeated_skip": 2,
+            "l2_interruption": 1,
+            "stagnation_days": 3,
+            "l2_protection_high": 0.75,
+            "l2_protection_medium": 0.5,
+            "escalation_window_days": 7,
+            "escalation_firm_resistance": 2,
+            "escalation_periodic_resistance": 4,
+            "safe_mode_enabled": False,
+            "safe_mode_resistance_threshold": 5,
+            "safe_mode_min_response_events": 3,
+            "safe_mode_max_confirmation_ratio": 0.34,
+            "safe_mode_recovery_confirmations": 2,
+            "safe_mode_cooldown_hours": 24,
+            "trust_repair_window_hours": 48,
+            "trust_repair_negative_streak": 2,
+            "reminder_budget_window_hours": 6,
+            "reminder_budget_max_prompts": 2,
+            "reminder_budget_enforce": True,
+            "cadence_support_recovery_cooldown_hours": 8,
+            "cadence_override_cooldown_hours": 3,
+            "cadence_observe_cooldown_hours": 12,
+            "cadence_trust_repair_cooldown_hours": 12,
+        },
+    )
+    monkeypatch.setattr(
+        retrospective,
+        "load_events_for_period",
+        lambda days: [
+            {
+                "type": "guardian_intervention_responded",
+                "timestamp": "2026-02-11T10:00:00",
+                "payload": {
+                    "days": 7,
+                    "fingerprint": "gcf_evidence",
+                    "action": "dismiss",
+                    "context": "instinct_escape",
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        retrospective,
+        "_safe_mode_state_from_runtime",
+        lambda: {"active": False, "entered_at": None, "exited_at": None, "reason": None},
+    )
+
+    payload = retrospective.build_guardian_retrospective_response(days=7)
+    policy = payload["intervention_policy"]
+
+    assert policy["policy_version"] == "guardian_policy_v1_evidence_loop"
+    assert policy["evidence"]["window_days"] == 7
+    assert policy["evidence"]["active_signal_count"] == 1
+    assert policy["evidence"]["response_events"]["total"] == 1
+    assert policy["evidence"]["response_events"]["action_counts"]["dismiss"] == 1
+    assert policy["evidence"]["response_events"]["action_counts"]["unknown"] == 0
+    assert policy["evidence"]["response_events"]["context_counts"]["instinct_escape"] == 1
+
+
+def test_build_response_policy_evidence_counts_unknown_action(monkeypatch):
+    monkeypatch.setattr(
+        retrospective,
+        "generate_guardian_retrospective",
+        lambda days: {
+            "period": {"days": days, "start_date": "2026-02-01", "end_date": "2026-02-07"},
+            "generated_at": "2026-02-11T12:00:00",
+            "rhythm": {"broken": False, "summary": "ok"},
+            "alignment": {"deviated": False, "summary": "ok"},
+            "friction": {"repeated_skip": True, "delay_signals": False, "summary": "friction"},
+            "l2_protection": {"ratio": 0.5, "level": "medium", "summary": "moderate"},
+            "l2_session": {"active_session": False, "active_session_id": None},
+            "deviation_signals": [],
+            "observations": ["keep focus"],
+        },
+    )
+    monkeypatch.setattr(retrospective, "get_intervention_level", lambda: "SOFT")
+    monkeypatch.setattr(retrospective, "_build_confirmation_fingerprint", lambda raw: "gcf_unknown_action")
+    monkeypatch.setattr(
+        retrospective,
+        "_guardian_thresholds",
+        lambda days: {
+            "repeated_skip": 2,
+            "l2_interruption": 1,
+            "stagnation_days": 3,
+            "l2_protection_high": 0.75,
+            "l2_protection_medium": 0.5,
+            "escalation_window_days": 7,
+            "escalation_firm_resistance": 2,
+            "escalation_periodic_resistance": 4,
+            "safe_mode_enabled": False,
+            "safe_mode_resistance_threshold": 5,
+            "safe_mode_min_response_events": 3,
+            "safe_mode_max_confirmation_ratio": 0.34,
+            "safe_mode_recovery_confirmations": 2,
+            "safe_mode_cooldown_hours": 24,
+            "trust_repair_window_hours": 48,
+            "trust_repair_negative_streak": 2,
+            "reminder_budget_window_hours": 6,
+            "reminder_budget_max_prompts": 2,
+            "reminder_budget_enforce": True,
+            "cadence_support_recovery_cooldown_hours": 8,
+            "cadence_override_cooldown_hours": 3,
+            "cadence_observe_cooldown_hours": 12,
+            "cadence_trust_repair_cooldown_hours": 12,
+        },
+    )
+    monkeypatch.setattr(
+        retrospective,
+        "load_events_for_period",
+        lambda days: [
+            {
+                "type": "guardian_intervention_responded",
+                "timestamp": "2026-02-11T10:00:00",
+                "payload": {
+                    "days": 7,
+                    "fingerprint": "gcf_unknown_action",
+                    "action": "skip_once",
+                    "context": "recovering",
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        retrospective,
+        "_safe_mode_state_from_runtime",
+        lambda: {"active": False, "entered_at": None, "exited_at": None, "reason": None},
+    )
+
+    payload = retrospective.build_guardian_retrospective_response(days=7)
+    policy = payload["intervention_policy"]
+
+    assert policy["evidence"]["response_events"]["total"] == 1
+    assert policy["evidence"]["response_events"]["action_counts"]["unknown"] == 1
 
 
 def test_intervention_policy_suppresses_repeated_prompts_with_budget(monkeypatch):

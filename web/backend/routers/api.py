@@ -2422,11 +2422,18 @@ async def get_state():
     registry = steward.registry
 
     identity = system_state.get("identity") or {}
-    active_tasks = [
-        task.__dict__
-        for task in system_state.get("tasks", [])
-        if str(getattr(task.status, "value", task.status)) == "pending"
-    ]
+    active_tasks = []
+    for task in system_state.get("tasks", []):
+        if isinstance(task, dict):
+            status = task.get("status")
+            task_payload = task
+        else:
+            status = getattr(task, "status", None)
+            task_payload = task.__dict__
+
+        status_value = getattr(status, "value", status)
+        if str(status_value) == "pending":
+            active_tasks.append(task_payload)
 
     state_audit = _normalized_audit(
         raw_audit={
@@ -2443,6 +2450,8 @@ async def get_state():
                 "retrospective.l2_session",
                 "retrospective.guardian_role",
                 "retrospective.intervention_policy",
+                "retrospective.intervention_policy.policy_version",
+                "retrospective.intervention_policy.evidence",
                 "retrospective.humanization_metrics",
                 "retrospective.north_star_metrics",
                 "retrospective.blueprint_narrative",
@@ -2559,6 +2568,16 @@ async def get_state():
             "response_action": retrospective.get("response_action", {}),
             "guardian_role": retrospective.get("guardian_role", {}),
             "policy": retrospective.get("intervention_policy", {}),
+            "policy_version": (
+                retrospective.get("intervention_policy", {}).get("policy_version")
+                if isinstance(retrospective.get("intervention_policy"), dict)
+                else None
+            ),
+            "policy_evidence": (
+                retrospective.get("intervention_policy", {}).get("evidence", {})
+                if isinstance(retrospective.get("intervention_policy"), dict)
+                else {}
+            ),
             "blueprint_narrative": blueprint_narrative,
             "explainability": retrospective.get("explainability", {}),
             "autotune": guardian_autotune,
@@ -2611,6 +2630,16 @@ async def get_state():
                 "l2_resume_ready": l2_session.get("resume_ready"),
                 "l2_resume_session_id": l2_session.get("resume_session_id"),
                 "l2_micro_ritual": l2_session.get("micro_ritual", {}),
+                "policy_version": (
+                    retrospective.get("intervention_policy", {}).get("policy_version")
+                    if isinstance(retrospective.get("intervention_policy"), dict)
+                    else None
+                ),
+                "policy_evidence": (
+                    retrospective.get("intervention_policy", {}).get("evidence", {})
+                    if isinstance(retrospective.get("intervention_policy"), dict)
+                    else {}
+                ),
             },
         },
         "audit": state_audit,

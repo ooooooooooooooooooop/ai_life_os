@@ -650,8 +650,9 @@ def _guardian_l2_protection(
     if medium_threshold > high_threshold:
         medium_threshold = high_threshold
 
+    now = datetime.now()
     day_keys = [
-        (datetime.now() - timedelta(days=offset)).strftime("%Y-%m-%d")
+        (now - timedelta(days=offset)).strftime("%Y-%m-%d")
         for offset in reversed(range(days))
     ]
     daily = {
@@ -659,34 +660,49 @@ def _guardian_l2_protection(
         for day in day_keys
     }
 
-    for event in events:
-        event_time = _parse_event_time(event)
-        if event_time is None or _phase_for_time(event_time) != "deep_work":
-            continue
+    def _accumulate(phase_filter: bool) -> Tuple[int, int]:
+        for day in day_keys:
+            daily[day]["protected"] = 0
+            daily[day]["interrupted"] = 0
 
-        outcome = _task_outcome_from_event(event)
-        if outcome not in {"completed", "skipped"}:
-            continue
+        for event in events:
+            event_time = _parse_event_time(event)
+            if event_time is None:
+                continue
+            if phase_filter and _phase_for_time(event_time) != "deep_work":
+                continue
 
-        task_id = _extract_task_id_from_event(event)
-        if not task_id:
-            continue
-        goal_id = task_goal_by_task_id.get(task_id)
-        if not goal_id:
-            continue
+            outcome = _task_outcome_from_event(event)
+            if outcome not in {"completed", "skipped"}:
+                continue
 
-        goal_type = str(goal_type_by_goal_id.get(goal_id, "")).upper()
-        if "L2" not in goal_type:
-            continue
+            task_id = _extract_task_id_from_event(event)
+            if not task_id:
+                continue
+            goal_id = task_goal_by_task_id.get(task_id)
+            if not goal_id:
+                continue
 
-        day = event_time.strftime("%Y-%m-%d")
-        if day not in daily:
-            continue
+            goal_type = str(goal_type_by_goal_id.get(goal_id, "")).upper()
+            if "L2" not in goal_type:
+                continue
 
-        if outcome == "completed":
-            daily[day]["protected"] += 1
-        elif outcome == "skipped":
-            daily[day]["interrupted"] += 1
+            day = event_time.strftime("%Y-%m-%d")
+            if day not in daily:
+                continue
+
+            if outcome == "completed":
+                daily[day]["protected"] += 1
+            elif outcome == "skipped":
+                daily[day]["interrupted"] += 1
+
+        protected = sum(daily[d]["protected"] for d in day_keys)
+        interrupted = sum(daily[d]["interrupted"] for d in day_keys)
+        return protected, interrupted
+
+    total_protected, total_interrupted = _accumulate(phase_filter=True)
+    if total_protected + total_interrupted == 0:
+        total_protected, total_interrupted = _accumulate(phase_filter=False)
 
     points = []
     total_protected = 0
@@ -1809,11 +1825,10 @@ def _guardian_response_from_event(event: Dict[str, Any]) -> Optional[Dict[str, A
         }
     if event_type != "guardian_intervention_responded":
         return None
-    action = str(payload.get("action", "")).lower()
-    if action not in GUARDIAN_RESPONSE_ACTIONS:
-        return None
+    action = str(payload.get("action", "")).strip().lower()
+    normalized_action = action if action in GUARDIAN_RESPONSE_ACTIONS else "unknown"
     return {
-        "action": action,
+        "action": normalized_action,
         "context": context,
         "event": event,
         "payload": payload,
@@ -2173,6 +2188,11 @@ def _guardian_trust_calibration_metrics(
         }
 
     recovery_minutes = _l2_resume_recovery_minutes(events)
+    interrupted_events = sum(
+        1
+        for event in events
+        if str(event.get("type") or "").strip().lower() == "l2_session_interrupted"
+    )
     if recovery_minutes:
         recovery_time_to_resume = {
             "status": "ready",
@@ -2180,6 +2200,16 @@ def _guardian_trust_calibration_metrics(
             "median_minutes": int(round(median(recovery_minutes))),
             "samples": len(recovery_minutes),
             "values_minutes": recovery_minutes,
+            "pending_interruptions": max(0, interrupted_events - len(recovery_minutes)),
+        }
+    elif interrupted_events > 0:
+        recovery_time_to_resume = {
+            "status": "pending",
+            "reason": "awaiting_l2_resume",
+            "median_minutes": None,
+            "samples": 0,
+            "values_minutes": [],
+            "pending_interruptions": interrupted_events,
         }
     else:
         recovery_time_to_resume = {
@@ -2188,10 +2218,11 @@ def _guardian_trust_calibration_metrics(
             "median_minutes": None,
             "samples": 0,
             "values_minutes": [],
+            "pending_interruptions": 0,
         }
 
     estimated_minutes_per_recovery = 15
-    if recovery_suggested > 0:
+    if recovery_suggested > 0 and recovery_adopted > 0:
         mundane_hours = round(
             (max(0, recovery_adopted) * estimated_minutes_per_recovery) / 60.0,
             2,
@@ -2200,6 +2231,15 @@ def _guardian_trust_calibration_metrics(
             "status": "ready",
             "reason": "",
             "hours": mundane_hours,
+            "adopted": max(0, recovery_adopted),
+            "suggested": max(0, recovery_suggested),
+            "estimated_minutes_per_recovery": estimated_minutes_per_recovery,
+        }
+    elif recovery_suggested > 0:
+        mundane_time_saved = {
+            "status": "pending",
+            "reason": "awaiting_recovery_adoption",
+            "hours": 0.0,
             "adopted": max(0, recovery_adopted),
             "suggested": max(0, recovery_suggested),
             "estimated_minutes_per_recovery": estimated_minutes_per_recovery,
@@ -3071,6 +3111,26 @@ def _guardian_intervention_policy(
     reason = _policy_mode_reason(mode, latest_context, highest_severity)
 
     responses = _iter_guardian_response_events(events, days=days)
+    response_action_counts = {"confirm": 0, "snooze": 0, "dismiss": 0, "unknown": 0}
+    response_context_counts = {
+        "recovering": 0,
+        "resource_blocked": 0,
+        "task_too_big": 0,
+        "instinct_escape": 0,
+        "unknown": 0,
+    }
+    for entry in responses:
+        action = str(entry.get("action") or "").strip().lower()
+        if action in response_action_counts:
+            response_action_counts[action] += 1
+        else:
+            response_action_counts["unknown"] += 1
+        context = _normalize_guardian_response_context(entry.get("context"))
+        if context in response_context_counts:
+            response_context_counts[context] += 1
+        else:
+            response_context_counts["unknown"] += 1
+
     window_hours = _coerce_int(
         thresholds.get("reminder_budget_window_hours"),
         default=6,
@@ -3141,11 +3201,57 @@ def _guardian_intervention_policy(
     else:
         intensity = "balanced"
 
+    evidence_active_signals = [
+        {
+            "signal": str(source.get("signal") or "").strip(),
+            "severity": str(source.get("severity") or "info").strip().lower(),
+            "count": source.get("count"),
+            "threshold": source.get("threshold"),
+        }
+        for source in suggestion_sources
+        if isinstance(source, dict) and str(source.get("signal") or "").strip()
+    ]
+
     return {
         "mode": mode,
         "reason": reason,
         "highest_signal_severity": highest_severity,
         "intensity": intensity,
+        "policy_version": "guardian_policy_v1_evidence_loop",
+        "evidence": {
+            "window_days": days,
+            "active_signal_count": len(evidence_active_signals),
+            "active_signals": evidence_active_signals,
+            "response_events": {
+                "total": len(responses),
+                "action_counts": response_action_counts,
+                "context_counts": response_context_counts,
+            },
+            "trust_repair": {
+                "active": bool(trust_repair.get("active")),
+                "reason": str(trust_repair.get("reason") or ""),
+                "negative_streak": _coerce_int(
+                    trust_repair.get("negative_streak"),
+                    default=0,
+                    min_value=0,
+                    max_value=999,
+                ),
+                "negative_streak_threshold": _coerce_int(
+                    trust_repair.get("negative_streak_threshold"),
+                    default=0,
+                    min_value=0,
+                    max_value=999,
+                ),
+                "recent_signal_count": _coerce_int(
+                    trust_repair.get("recent_signal_count"),
+                    default=0,
+                    min_value=0,
+                    max_value=9999,
+                ),
+                "last_negative_at": trust_repair.get("last_negative_at"),
+                "streak_sources": trust_repair.get("streak_sources", []),
+            },
+        },
         "friction_budget": {
             "enabled": enforce_budget,
             "window_hours": window_hours,
