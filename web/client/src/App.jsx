@@ -4,6 +4,8 @@ import { api } from './utils/api';
 
 // Components
 import Navbar from './components/Navbar';
+import { ToastProvider } from './components/Toast';
+import ErrorBoundary from './components/ErrorBoundary';
 
 // Pages
 import Home from './pages/Home';
@@ -48,24 +50,28 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-900">
-      {/* Dynamic Background */}
-      <div className="fixed inset-0 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 -z-10" />
+    <ErrorBoundary>
+      <ToastProvider>
+        <div className="min-h-screen bg-slate-900">
+          {/* Dynamic Background */}
+          <div className="fixed inset-0 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 -z-10" />
 
-      {/* Navbar */}
-      {location.pathname !== '/onboarding' && <Navbar />}
+          {/* Navbar */}
+          {location.pathname !== '/onboarding' && <Navbar />}
 
-      {/* Main Content */}
-      <main className="py-8">
-        <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/onboarding" element={<Onboarding />} />
-          <Route path="/goals/new" element={<GoalGeneration />} />
-          <Route path="/vision/new" element={<VisionCreation />} />
-          <Route path="/goals/:goalId/decompose" element={<GoalDecompose />} />
-        </Routes>
-      </main>
-    </div>
+          {/* Main Content */}
+          <main className="py-8">
+            <Routes>
+              <Route path="/" element={<Home />} />
+              <Route path="/onboarding" element={<Onboarding />} />
+              <Route path="/goals/new" element={<GoalGeneration />} />
+              <Route path="/vision/new" element={<VisionCreation />} />
+              <Route path="/goals/:goalId/decompose" element={<GoalDecompose />} />
+            </Routes>
+          </main>
+        </div>
+      </ToastProvider>
+    </ErrorBoundary>
   );
 }
 
