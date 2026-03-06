@@ -1,17 +1,21 @@
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 
 from core.goal_service import GoalService
 from core.llm_adapter import get_llm
 from core.objective_engine.models import GoalState
 from core.objective_engine.registry import GoalRegistry
+from core.intent_recognition import EnhancedIntentRecognizer, IntentResult
 
 class InteractionResponse(BaseModel):
     response_text: str
-    action_type: str  # "UPDATE_IDENTITY", "GOAL_FEEDBACK", "CHAT", "NONE"
+    action_type: str  # "UPDATE_IDENTITY", "GOAL_FEEDBACK", "ASK", "CONFIRM", "CANCEL", "CHAT", "NONE"
     updated_fields: List[str] = []
     updates: Dict[str, Any] = {}
+    confidence: float = 1.0
+    needs_clarification: bool = False
+    clarification_options: List[str] = []
 
 PROMPT_TEMPLATE = """
 You are the Steward of an AI Life OS. You are interacting with the User directly.
@@ -47,11 +51,16 @@ Return JSON format:
 """
 
 class InteractionHandler:
-    def __init__(self, registry: GoalRegistry, state: Dict[str, Any]):
+    def __init__(self, registry: GoalRegistry, state: Dict[str, Any], use_enhanced: bool = True):
         self.registry = registry
         self.state = state
         # Use Strategic Brain for better conversation context
         self.llm = get_llm("strategic_brain")
+
+        # Initialize enhanced intent recognizer
+        self.use_enhanced = use_enhanced
+        if use_enhanced:
+            self.intent_recognizer = EnhancedIntentRecognizer(self.llm)
 
     def process(self, message: str) -> InteractionResponse:
         # Prepare context
@@ -62,6 +71,71 @@ class InteractionHandler:
         ]
         state_summary = json.dumps(self.state.get("identity", {}), ensure_ascii=False)
 
+        # Use enhanced intent recognizer if enabled
+        if self.use_enhanced:
+            return self._process_enhanced(message, state_summary, active_goals)
+        else:
+            return self._process_legacy(message, state_summary, active_goals)
+
+    def _process_enhanced(
+        self, message: str, state_summary: str, active_goals: List[str]
+    ) -> InteractionResponse:
+        """Process message using enhanced intent recognizer."""
+        try:
+            # Recognize intent
+            result = self.intent_recognizer.recognize_intent(
+                message, state_summary, active_goals
+            )
+
+            updated_fields = []
+
+            # Handle different intents
+            if result.intent == "UPDATE_IDENTITY":
+                self._update_identity(result.updates)
+                updated_fields = list(result.updates.keys())
+
+            elif result.intent == "GOAL_FEEDBACK":
+                self._handle_goal_feedback(result.updates)
+                updated_fields = list(result.updates.keys())
+
+            elif result.intent == "ASK":
+                # Handle ASK intent
+                ask_type = result.updates.get("ask_type", "ASK_STATUS")
+                reply = self.intent_recognizer.handle_ask_intent(
+                    ask_type, self.state, self.registry.goals
+                )
+                result.reply = reply
+
+            elif result.intent == "CONFIRM":
+                # Handle confirmation
+                result.reply = "Action confirmed. Proceeding..."
+
+            elif result.intent == "CANCEL":
+                # Handle cancellation
+                result.reply = "Action cancelled."
+
+            return InteractionResponse(
+                response_text=result.reply,
+                action_type=result.intent,
+                updated_fields=updated_fields,
+                updates=result.updates,
+                confidence=result.confidence,
+                needs_clarification=result.needs_clarification,
+                clarification_options=result.clarification_options,
+            )
+
+        except Exception as e:
+            print(f"Enhanced Interaction Error: {e}")
+            return InteractionResponse(
+                response_text=f"System Error: {str(e)}",
+                action_type="ERROR",
+                confidence=0.0,
+            )
+
+    def _process_legacy(
+        self, message: str, state_summary: str, active_goals: List[str]
+    ) -> InteractionResponse:
+        """Process message using legacy method (backward compatibility)."""
         prompt = PROMPT_TEMPLATE.format(
             state_summary=state_summary,
             active_goals="\n".join(active_goals) if active_goals else "None",
