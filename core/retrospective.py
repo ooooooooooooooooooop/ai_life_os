@@ -24,6 +24,12 @@ from core.signal_detector import (
     detect_deviation_signals,
     detect_instinct_hijack_signals,
 )
+from core.event_analyzer import (
+    load_events_for_period,
+    analyze_completion_stats,
+    identify_failure_patterns,
+    calculate_activity_trend,
+)
 
 GUARDIAN_RESPONSE_ACTIONS = {"confirm", "snooze", "dismiss"}
 GUARDIAN_RESPONSE_CONTEXTS = (
