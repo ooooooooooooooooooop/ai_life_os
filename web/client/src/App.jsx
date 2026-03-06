@@ -2,6 +2,9 @@ import { useState, useEffect } from 'react';
 import { Routes, Route, useNavigate, useLocation } from 'react-router-dom';
 import { api } from './utils/api';
 
+// Components
+import Navbar from './components/Navbar';
+
 // Pages
 import Home from './pages/Home';
 import Onboarding from './pages/Onboarding';
@@ -35,32 +38,33 @@ function App() {
 
   if (loading) {
     return (
-      <div className="flex-center" style={{ height: '100vh' }}>
-        <div className="animate-pulse">Loading AI Life OS...</div>
+      <div className="min-h-screen flex items-center justify-center bg-slate-900">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+          <p className="text-gray-400">Loading AI Life OS...</p>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="app-container">
+    <div className="min-h-screen bg-slate-900">
       {/* Dynamic Background */}
-      <div style={{
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        width: '100%',
-        height: '100%',
-        background: 'radial-gradient(circle at 50% 50%, #1e293b 0%, #0f172a 100%)',
-        zIndex: -1
-      }} />
+      <div className="fixed inset-0 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 -z-10" />
 
-      <Routes>
-        <Route path="/" element={<Home />} />
-        <Route path="/onboarding" element={<Onboarding />} />
-        <Route path="/goals/new" element={<GoalGeneration />} />
-        <Route path="/vision/new" element={<VisionCreation />} />
-        <Route path="/goals/:goalId/decompose" element={<GoalDecompose />} />
-      </Routes>
+      {/* Navbar */}
+      {location.pathname !== '/onboarding' && <Navbar />}
+
+      {/* Main Content */}
+      <main className="py-8">
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/onboarding" element={<Onboarding />} />
+          <Route path="/goals/new" element={<GoalGeneration />} />
+          <Route path="/vision/new" element={<VisionCreation />} />
+          <Route path="/goals/:goalId/decompose" element={<GoalDecompose />} />
+        </Routes>
+      </main>
     </div>
   );
 }
