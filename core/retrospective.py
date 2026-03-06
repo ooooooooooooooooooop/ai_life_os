@@ -30,6 +30,12 @@ from core.event_analyzer import (
     identify_failure_patterns,
     calculate_activity_trend,
 )
+from core.threshold_manager import (
+    get_guardian_thresholds,
+    _coerce_int,
+    _coerce_float,
+    _coerce_bool,
+)
 
 GUARDIAN_RESPONSE_ACTIONS = {"confirm", "snooze", "dismiss"}
 GUARDIAN_RESPONSE_CONTEXTS = (
@@ -347,223 +353,12 @@ def _coerce_bool(value: Any, default: bool) -> bool:
 
 
 def _guardian_thresholds(days: int) -> Dict[str, Any]:
-    defaults = {
-        "repeated_skip": 2,
-        "l2_interruption": 1,
-        "stagnation_days": 3 if days >= 3 else 1,
-        "l2_protection_high": 0.75,
-        "l2_protection_medium": 0.50,
-        "escalation_window_days": 7,
-        "escalation_firm_resistance": 2,
-        "escalation_periodic_resistance": 4,
-        "safe_mode_enabled": True,
-        "safe_mode_resistance_threshold": 5,
-        "safe_mode_min_response_events": 3,
-        "safe_mode_max_confirmation_ratio": 0.34,
-        "safe_mode_recovery_confirmations": 2,
-        "safe_mode_cooldown_hours": 24,
-        "reminder_budget_window_hours": 6,
-        "reminder_budget_max_prompts": 2,
-        "reminder_budget_enforce": True,
-        "trust_repair_window_hours": 48,
-        "trust_repair_negative_streak": 2,
-        "cadence_support_recovery_cooldown_hours": 8,
-        "cadence_override_cooldown_hours": 3,
-        "cadence_observe_cooldown_hours": 12,
-        "cadence_trust_repair_cooldown_hours": 12,
-    }
+    """
+    Get Guardian thresholds with defaults and blueprint overrides.
 
-    blueprint_config = _load_blueprint_config()
-    raw_thresholds = blueprint_config.get("guardian_thresholds", {})
-    if not isinstance(raw_thresholds, dict):
-        raw_thresholds = {}
-
-    deviation_raw = raw_thresholds.get("deviation_signals", {})
-    if not isinstance(deviation_raw, dict):
-        deviation_raw = {}
-
-    l2_raw = raw_thresholds.get("l2_protection", {})
-    if not isinstance(l2_raw, dict):
-        l2_raw = {}
-
-    authority_raw = blueprint_config.get("guardian_authority", {})
-    if not isinstance(authority_raw, dict):
-        authority_raw = {}
-
-    escalation_raw = authority_raw.get("escalation", {})
-    if not isinstance(escalation_raw, dict):
-        escalation_raw = {}
-
-    safe_mode_raw = authority_raw.get("safe_mode", {})
-    if not isinstance(safe_mode_raw, dict):
-        safe_mode_raw = {}
-    cadence_raw = authority_raw.get("cadence", {})
-    if not isinstance(cadence_raw, dict):
-        cadence_raw = {}
-
-    repeated_skip = _coerce_int(
-        deviation_raw.get("repeated_skip", raw_thresholds.get("repeated_skip")),
-        default=defaults["repeated_skip"],
-        min_value=1,
-    )
-    l2_interruption = _coerce_int(
-        deviation_raw.get("l2_interruption", raw_thresholds.get("l2_interruption")),
-        default=defaults["l2_interruption"],
-        min_value=1,
-    )
-    stagnation_days = _coerce_int(
-        deviation_raw.get("stagnation_days", raw_thresholds.get("stagnation_days")),
-        default=defaults["stagnation_days"],
-        min_value=1,
-    )
-    high = _coerce_float(
-        l2_raw.get("high", raw_thresholds.get("l2_protection_high")),
-        default=defaults["l2_protection_high"],
-        min_value=0.0,
-        max_value=1.0,
-    )
-    medium = _coerce_float(
-        l2_raw.get("medium", raw_thresholds.get("l2_protection_medium")),
-        default=defaults["l2_protection_medium"],
-        min_value=0.0,
-        max_value=1.0,
-    )
-    if medium > high:
-        medium = high
-
-    escalation_window_days = _coerce_int(
-        escalation_raw.get("window_days"),
-        default=defaults["escalation_window_days"],
-        min_value=1,
-        max_value=30,
-    )
-    escalation_firm_resistance = _coerce_int(
-        escalation_raw.get("firm_reminder_resistance"),
-        default=defaults["escalation_firm_resistance"],
-        min_value=1,
-        max_value=99,
-    )
-    escalation_periodic_resistance = _coerce_int(
-        escalation_raw.get("periodic_check_resistance"),
-        default=defaults["escalation_periodic_resistance"],
-        min_value=1,
-        max_value=99,
-    )
-    if escalation_periodic_resistance < escalation_firm_resistance:
-        escalation_periodic_resistance = escalation_firm_resistance
-
-    safe_mode_enabled = _coerce_bool(
-        safe_mode_raw.get("enabled"),
-        defaults["safe_mode_enabled"],
-    )
-    safe_mode_resistance_threshold = _coerce_int(
-        safe_mode_raw.get("resistance_threshold"),
-        default=defaults["safe_mode_resistance_threshold"],
-        min_value=1,
-        max_value=999,
-    )
-    safe_mode_min_response_events = _coerce_int(
-        safe_mode_raw.get("min_response_events"),
-        default=defaults["safe_mode_min_response_events"],
-        min_value=1,
-        max_value=999,
-    )
-    safe_mode_max_confirmation_ratio = _coerce_float(
-        safe_mode_raw.get("max_confirmation_ratio"),
-        default=defaults["safe_mode_max_confirmation_ratio"],
-        min_value=0.0,
-        max_value=1.0,
-    )
-    safe_mode_recovery_confirmations = _coerce_int(
-        safe_mode_raw.get("recovery_confirmations"),
-        default=defaults["safe_mode_recovery_confirmations"],
-        min_value=1,
-        max_value=999,
-    )
-    safe_mode_cooldown_hours = _coerce_int(
-        safe_mode_raw.get("cooldown_hours"),
-        default=defaults["safe_mode_cooldown_hours"],
-        min_value=1,
-        max_value=720,
-    )
-    reminder_budget_window_hours = _coerce_int(
-        cadence_raw.get("reminder_budget_window_hours"),
-        default=defaults["reminder_budget_window_hours"],
-        min_value=1,
-        max_value=168,
-    )
-    reminder_budget_max_prompts = _coerce_int(
-        cadence_raw.get("reminder_budget_max_prompts"),
-        default=defaults["reminder_budget_max_prompts"],
-        min_value=1,
-        max_value=24,
-    )
-    reminder_budget_enforce = _coerce_bool(
-        cadence_raw.get("reminder_budget_enforce"),
-        defaults["reminder_budget_enforce"],
-    )
-    trust_repair_window_hours = _coerce_int(
-        cadence_raw.get("trust_repair_window_hours"),
-        default=defaults["trust_repair_window_hours"],
-        min_value=1,
-        max_value=336,
-    )
-    trust_repair_negative_streak = _coerce_int(
-        cadence_raw.get("trust_repair_negative_streak"),
-        default=defaults["trust_repair_negative_streak"],
-        min_value=1,
-        max_value=20,
-    )
-    cadence_support_recovery_cooldown_hours = _coerce_int(
-        cadence_raw.get("support_recovery_cooldown_hours"),
-        default=defaults["cadence_support_recovery_cooldown_hours"],
-        min_value=1,
-        max_value=168,
-    )
-    cadence_override_cooldown_hours = _coerce_int(
-        cadence_raw.get("override_cooldown_hours"),
-        default=defaults["cadence_override_cooldown_hours"],
-        min_value=1,
-        max_value=168,
-    )
-    cadence_observe_cooldown_hours = _coerce_int(
-        cadence_raw.get("observe_cooldown_hours"),
-        default=defaults["cadence_observe_cooldown_hours"],
-        min_value=1,
-        max_value=168,
-    )
-    cadence_trust_repair_cooldown_hours = _coerce_int(
-        cadence_raw.get("trust_repair_cooldown_hours"),
-        default=defaults["cadence_trust_repair_cooldown_hours"],
-        min_value=1,
-        max_value=168,
-    )
-
-    return {
-        "repeated_skip": repeated_skip,
-        "l2_interruption": l2_interruption,
-        "stagnation_days": stagnation_days,
-        "l2_protection_high": high,
-        "l2_protection_medium": medium,
-        "escalation_window_days": escalation_window_days,
-        "escalation_firm_resistance": escalation_firm_resistance,
-        "escalation_periodic_resistance": escalation_periodic_resistance,
-        "safe_mode_enabled": safe_mode_enabled,
-        "safe_mode_resistance_threshold": safe_mode_resistance_threshold,
-        "safe_mode_min_response_events": safe_mode_min_response_events,
-        "safe_mode_max_confirmation_ratio": safe_mode_max_confirmation_ratio,
-        "safe_mode_recovery_confirmations": safe_mode_recovery_confirmations,
-        "safe_mode_cooldown_hours": safe_mode_cooldown_hours,
-        "reminder_budget_window_hours": reminder_budget_window_hours,
-        "reminder_budget_max_prompts": reminder_budget_max_prompts,
-        "reminder_budget_enforce": reminder_budget_enforce,
-        "trust_repair_window_hours": trust_repair_window_hours,
-        "trust_repair_negative_streak": trust_repair_negative_streak,
-        "cadence_support_recovery_cooldown_hours": cadence_support_recovery_cooldown_hours,
-        "cadence_override_cooldown_hours": cadence_override_cooldown_hours,
-        "cadence_observe_cooldown_hours": cadence_observe_cooldown_hours,
-        "cadence_trust_repair_cooldown_hours": cadence_trust_repair_cooldown_hours,
-    }
+    Backward compatibility wrapper for threshold_manager.get_guardian_thresholds.
+    """
+    return get_guardian_thresholds(days)
 
 
 def _extract_task_id_from_event(event: Dict[str, Any]) -> Optional[str]:
@@ -640,7 +435,7 @@ def _guardian_l2_protection(
     """
     goal_type_by_goal_id, task_goal_by_task_id = _build_l2_reference_maps()
     if thresholds is None:
-        thresholds = _guardian_thresholds(days)
+        thresholds = get_guardian_thresholds(days)
     high_threshold = _coerce_float(
         thresholds.get("l2_protection_high"),
         default=0.75,
@@ -969,118 +764,12 @@ def _detect_deviation_signals(
 ) -> List[Dict[str, Any]]:
     """
     Detect behavior deviation signals and provide traceable evidence.
+
+    Backward compatibility wrapper for signal_detector.detect_deviation_signals.
     """
-    skip_events: List[Dict[str, Any]] = []
-    l2_interruptions: List[Dict[str, Any]] = []
-    progress_events: List[Dict[str, Any]] = []
-
-    for event in events:
-        event_time = _parse_event_time(event)
-        event_type = event.get("type")
-
-        if _is_task_skip_event(event):
-            skip_events.append(event)
-            if event_time and _phase_for_time(event_time) == "deep_work":
-                l2_interruptions.append(event)
-        elif event_type == "l2_session_interrupted":
-            l2_interruptions.append(event)
-
-        if _is_progress_event(event):
-            progress_events.append(event)
-
-    if thresholds is None:
-        thresholds = _guardian_thresholds(days)
-
-    repeated_skip_threshold = _coerce_int(
-        thresholds.get("repeated_skip"),
-        default=2,
-        min_value=1,
+    return detect_deviation_signals(
+        events, days, thresholds=thresholds, guardian_thresholds_func=_guardian_thresholds
     )
-    l2_interruption_threshold = _coerce_int(
-        thresholds.get("l2_interruption"),
-        default=1,
-        min_value=1,
-    )
-    stagnation_threshold_days = _coerce_int(
-        thresholds.get("stagnation_days"),
-        default=(3 if days >= 3 else 1),
-        min_value=1,
-    )
-
-    repeated_skip_count = len(skip_events)
-    repeated_skip_active = repeated_skip_count >= repeated_skip_threshold
-
-    l2_interruption_count = len(l2_interruptions)
-    l2_interruption_active = l2_interruption_count >= l2_interruption_threshold
-
-    now = datetime.now()
-    recent_progress_time = max(
-        (_parse_event_time(ev) for ev in progress_events if _parse_event_time(ev)),
-        default=None,
-    )
-    if recent_progress_time is None:
-        days_without_progress = days
-    else:
-        days_without_progress = max(0, (now - recent_progress_time).days)
-    stagnation_active = days_without_progress >= stagnation_threshold_days
-
-    signals = [
-        {
-            "name": "repeated_skip",
-            "active": repeated_skip_active,
-            "severity": "medium" if repeated_skip_active else "info",
-            "count": repeated_skip_count,
-            "threshold": repeated_skip_threshold,
-            "summary": (
-                f"检测到 {repeated_skip_count} 次跳过行为，可能存在执行摩擦。"
-                if repeated_skip_active
-                else "未检测到重复跳过行为。"
-            ),
-            "evidence": [
-                _event_evidence(ev, "task skipped")
-                for ev in skip_events[-3:]
-            ],
-        },
-        {
-            "name": "l2_interruption",
-            "active": l2_interruption_active,
-            "severity": "high" if l2_interruption_active else "info",
-            "count": l2_interruption_count,
-            "threshold": l2_interruption_threshold,
-            "summary": (
-                f"检测到 {l2_interruption_count} 次 L2 中断（深度时段跳过或会话中断）。"
-                if l2_interruption_active
-                else "未检测到深度工作时段中断信号。"
-            ),
-            "evidence": _l2_interruption_evidence(l2_interruptions[-3:], now),
-        },
-        {
-            "name": "stagnation",
-            "active": stagnation_active,
-            "severity": "medium" if stagnation_active else "info",
-            "count": days_without_progress,
-            "threshold": stagnation_threshold_days,
-            "summary": (
-                f"最近 {days_without_progress} 天未观察到明确推进事件，存在停滞风险。"
-                if stagnation_active
-                else "近期推进节奏正常。"
-            ),
-            "evidence": (
-                []
-                if recent_progress_time is None
-                else [
-                    {
-                        "event_id": None,
-                        "type": "progress_marker",
-                        "timestamp": recent_progress_time.isoformat(),
-                        "detail": "latest progress timestamp",
-                    }
-                ]
-            ),
-        },
-    ]
-
-    return signals
 
 
 def _detect_instinct_hijack_signals(
@@ -1100,7 +789,7 @@ def _detect_instinct_hijack_signals(
         劫持信号列表，每个信号包含 name, pattern, active, severity, count, threshold, summary, evidence
     """
     if thresholds is None:
-        thresholds = _guardian_thresholds(days)
+        thresholds = get_guardian_thresholds(days)
 
     hijack_thresholds = thresholds.get("instinct_hijack", {})
     if not isinstance(hijack_thresholds, dict):
@@ -1599,7 +1288,7 @@ def generate_guardian_retrospective(days: int = 7) -> Dict[str, Any]:
         now = datetime.now()
         start_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
         end_date = now.strftime("%Y-%m-%d")
-        thresholds = _guardian_thresholds(days)
+        thresholds = get_guardian_thresholds(days)
 
         rhythm = _guardian_rhythm(events, days)
         alignment = _guardian_alignment(events)
