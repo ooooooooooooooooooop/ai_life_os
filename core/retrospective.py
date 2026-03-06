@@ -23,6 +23,11 @@ from core.llm_adapter import get_llm
 from core.signal_detector import (
     detect_deviation_signals,
     detect_instinct_hijack_signals,
+    _parse_event_time,
+    _phase_for_time,
+    _is_task_skip_event,
+    _is_progress_event,
+    _event_evidence,
 )
 from core.event_analyzer import (
     load_events_for_period,
@@ -32,6 +37,7 @@ from core.event_analyzer import (
 )
 from core.threshold_manager import (
     get_guardian_thresholds,
+    _load_blueprint_config,
     _coerce_int,
     _coerce_float,
     _coerce_bool,
@@ -234,122 +240,6 @@ def calculate_activity_trend(events: List[Dict[str, Any]]) -> Dict[str, int]:
                 continue
 
     return dict(daily_counts)
-
-
-def _parse_event_time(event: Dict[str, Any]) -> Optional[datetime]:
-    """Parse event timestamp to naive datetime."""
-    timestamp_str = event.get("timestamp", "")
-    if not timestamp_str:
-        return None
-    try:
-        parsed = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-        return parsed.replace(tzinfo=None)
-    except ValueError:
-        return None
-
-
-def _phase_for_time(dt: datetime) -> str:
-    """Map datetime to configured energy phase."""
-    current_time = dt.strftime("%H:%M")
-    for time_range, phase in config.ENERGY_PHASES.items():
-        start_str, end_str = time_range.split("-")
-        if start_str <= current_time < end_str:
-            return phase
-    return config.DEFAULT_ENERGY_PHASE
-
-
-def _is_task_skip_event(event: Dict[str, Any]) -> bool:
-    """Detect task skip-like events from event payload."""
-    event_type = event.get("type")
-    if event_type == "task_failed" and event.get("failure_type") == "skipped":
-        return True
-    if event_type != "task_updated":
-        return False
-    payload = event.get("payload") or {}
-    updates = payload.get("updates", {}) if isinstance(payload, dict) else {}
-    status = str(updates.get("status", "")).lower()
-    return status == "skipped"
-
-
-def _is_progress_event(event: Dict[str, Any]) -> bool:
-    """Events that indicate forward progress."""
-    event_type = event.get("type")
-    if event_type in {"goal_completed", "progress_updated"}:
-        return True
-    if event_type == "execution_completed":
-        outcome = str((event.get("payload") or {}).get("outcome", "")).lower()
-        return outcome == "completed"
-    if event_type != "task_updated":
-        return False
-    payload = event.get("payload") or {}
-    updates = payload.get("updates", {}) if isinstance(payload, dict) else {}
-    status = str(updates.get("status", "")).lower()
-    return status == "completed"
-
-
-def _event_evidence(event: Dict[str, Any], detail: str) -> Dict[str, Any]:
-    return {
-        "event_id": event.get("event_id"),
-        "type": event.get("type"),
-        "timestamp": event.get("timestamp"),
-        "detail": detail,
-    }
-
-
-def _load_blueprint_config() -> Dict[str, Any]:
-    """加载blueprint配置，使用缓存机制。"""
-    from core.config_cache import load_yaml_with_cache
-
-    config_path = Path(__file__).parent.parent / "config" / "blueprint.yaml"
-    return load_yaml_with_cache(config_path)
-
-
-def _coerce_int(
-    value: Any,
-    default: int,
-    min_value: Optional[int] = None,
-    max_value: Optional[int] = None,
-) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = default
-    if min_value is not None:
-        parsed = max(min_value, parsed)
-    if max_value is not None:
-        parsed = min(max_value, parsed)
-    return parsed
-
-
-def _coerce_float(
-    value: Any,
-    default: float,
-    min_value: Optional[float] = None,
-    max_value: Optional[float] = None,
-) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        parsed = default
-    if min_value is not None:
-        parsed = max(min_value, parsed)
-    if max_value is not None:
-        parsed = min(max_value, parsed)
-    return parsed
-
-
-def _coerce_bool(value: Any, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"1", "true", "yes", "on"}:
-            return True
-        if lowered in {"0", "false", "no", "off"}:
-            return False
-    if value is None:
-        return default
-    return bool(value)
 
 
 def _guardian_thresholds(days: int) -> Dict[str, Any]:
