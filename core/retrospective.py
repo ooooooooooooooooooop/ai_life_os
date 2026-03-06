@@ -20,6 +20,10 @@ import yaml
 from core.config_manager import config
 from core.event_sourcing import EVENT_LOG_PATH, rebuild_state
 from core.llm_adapter import get_llm
+from core.signal_detector import (
+    detect_deviation_signals,
+    detect_instinct_hijack_signals,
+)
 
 GUARDIAN_RESPONSE_ACTIONS = {"confirm", "snooze", "dismiss"}
 GUARDIAN_RESPONSE_CONTEXTS = (
@@ -1597,10 +1601,14 @@ def generate_guardian_retrospective(days: int = 7) -> Dict[str, Any]:
         friction = _guardian_friction(events)
         l2_protection = _guardian_l2_protection(events, days, thresholds=thresholds)
         l2_session = _guardian_l2_session(events)
-        deviation_signals = _detect_deviation_signals(events, days, thresholds=thresholds)
+        deviation_signals = detect_deviation_signals(
+            events, days, thresholds=thresholds, guardian_thresholds_func=_guardian_thresholds
+        )
 
         # Iteration 10: 新增本能劫持检测
-        hijack_signals = _detect_instinct_hijack_signals(events, days, thresholds=thresholds)
+        hijack_signals = detect_instinct_hijack_signals(
+            events, days, thresholds=thresholds, guardian_thresholds_func=_guardian_thresholds
+        )
         deviation_signals.extend(hijack_signals)
 
         observations = _guardian_observations(
