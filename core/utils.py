@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -85,3 +86,77 @@ def parse_llm_json(content: str) -> Optional[Dict[str, Any]]:
         return json.loads(content.strip())
     except json.JSONDecodeError:
         return None
+
+
+def parse_iso_timestamp(timestamp_str: str) -> Optional[datetime]:
+    """
+    解析ISO 8601时间戳字符串。
+
+    支持多种时间戳格式：
+    - ISO 8601 with timezone: "2024-01-01T12:00:00+00:00"
+    - ISO 8601 with Z suffix: "2024-01-01T12:00:00Z"
+    - ISO 8601 without timezone: "2024-01-01T12:00:00"
+    - Date only: "2024-01-01"
+
+    Args:
+        timestamp_str: 时间戳字符串
+
+    Returns:
+        datetime对象，解析失败返回None
+
+    Example:
+        >>> parse_iso_timestamp("2024-01-01T12:00:00Z")
+        datetime.datetime(2024, 1, 1, 12, 0)
+        >>> parse_iso_timestamp("2024-01-01T12:00:00+00:00")
+        datetime.datetime(2024, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    """
+    if not timestamp_str:
+        return None
+
+    try:
+        # 处理Z后缀（UTC时间）
+        if timestamp_str.endswith("Z"):
+            timestamp_str = timestamp_str[:-1] + "+00:00"
+
+        # 尝试解析ISO格式
+        return datetime.fromisoformat(timestamp_str)
+
+    except (ValueError, AttributeError):
+        return None
+
+
+def safe_json_loads(
+    json_str: str,
+    default: Any = None,
+    context: Optional[str] = None
+) -> Any:
+    """
+    安全的JSON解析函数。
+
+    提供详细的错误日志和上下文信息，支持默认值。
+
+    Args:
+        json_str: JSON字符串
+        default: 解析失败时的默认返回值
+        context: 上下文信息（用于错误日志）
+
+    Returns:
+        解析后的对象，解析失败返回default
+
+    Example:
+        >>> safe_json_loads('{"key": "value"}')
+        {'key': 'value'}
+        >>> safe_json_loads('invalid json', default={})
+        {}
+    """
+    if not json_str:
+        return default
+
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        error_msg = f"JSON解析失败: {e}"
+        if context:
+            error_msg = f"{context} - {error_msg}"
+        print(f"[Warning] {error_msg}")
+        return default

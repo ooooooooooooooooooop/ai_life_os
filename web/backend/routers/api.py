@@ -3141,6 +3141,57 @@ async def update_guardian_config(request: GuardianConfigUpdateRequest):
     }
 
 
+class SafeModeExitRequest(BaseModel):
+    reason: str = "user_initiated"
+
+
+@router.post("/safe-mode/exit")
+async def exit_safe_mode(request: SafeModeExitRequest = SafeModeExitRequest()):
+    """
+    用户主动退出 Safe Mode。
+    """
+    from core.event_sourcing import rebuild_state, append_event
+
+    # 1. 检查当前是否处于 Safe Mode
+    state = rebuild_state()
+    guardian = state.get("guardian", {})
+    safe_mode = guardian.get("safe_mode", {})
+
+    if not isinstance(safe_mode, dict):
+        safe_mode = {}
+
+    if not safe_mode.get("active"):
+        raise HTTPException(status_code=400, detail="Not in Safe Mode")
+
+    # 2. 记录退出事件
+    entered_at = safe_mode.get("entered_at")
+    duration_hours = None
+    if entered_at:
+        try:
+            entered_time = datetime.fromisoformat(str(entered_at).replace("Z", "+00:00")).replace(tzinfo=None)
+            duration_hours = (datetime.now() - entered_time).total_seconds() / 3600
+        except Exception:
+            pass
+
+    event = {
+        "type": "safe_mode_exited",
+        "timestamp": datetime.now().isoformat(),
+        "payload": {
+            "reason": request.reason,
+            "entered_at": entered_at,
+            "duration_hours": round(duration_hours, 2) if duration_hours else None,
+        }
+    }
+    append_event(event)
+
+    return {
+        "status": "success",
+        "message": "Safe Mode exited successfully",
+        "exited_at": datetime.now().isoformat(),
+        "duration_hours": round(duration_hours, 2) if duration_hours else None,
+    }
+
+
 @router.get("/guardian/boundaries/config")
 async def get_guardian_boundaries_config():
     config_payload = _normalized_guardian_boundaries_config(_load_blueprint_yaml())

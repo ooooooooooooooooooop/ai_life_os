@@ -162,7 +162,7 @@ def test_onboarding_generate_confirm_decompose_home_flow(client, monkeypatch):
         assert response.status_code == 200, path
 
 
-def test_state_and_goal_route_views_are_consistent(client):
+def test_state_and_goal_route_views_are_consistent(client, clear_goal_registry_singleton):
     service = GoalService()
     vision = service.create_node(
         title="Vision Root",
@@ -206,7 +206,7 @@ def test_state_and_goal_route_views_are_consistent(client):
     assert tree_payload[0]["children"][0]["children"][0]["id"] == goal.id
 
 
-def test_steward_cycle_does_not_create_duplicate_or_invisible_goals(client, monkeypatch):
+def test_steward_cycle_does_not_create_duplicate_or_invisible_goals(client, monkeypatch, clear_goal_registry_singleton):
     # Make state non-cold-start so Steward enters goal inference path.
     event_sourcing.append_event(
         {"type": "profile_updated", "payload": {"field": "occupation", "value": "Engineer"}}

@@ -21,4 +21,19 @@ def get_data_dir() -> Path:
     return PROJECT_ROOT / "data"
 
 
+def get_config_dir() -> Path:
+    """
+    Return config directory.
+
+    Priority:
+    1. AI_LIFE_OS_CONFIG_DIR env var
+    2. <project_root>/config
+    """
+    raw = os.getenv("AI_LIFE_OS_CONFIG_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return PROJECT_ROOT / "config"
+
+
 DATA_DIR = get_data_dir()
+CONFIG_DIR = get_config_dir()

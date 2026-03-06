@@ -169,3 +169,66 @@ class LLMRateLimitError(LLMError):
             self.hint = f"请在 {retry_after} 秒后重试"
         else:
             self.hint = "请稍后重试"
+
+
+# ========== Phase 8新增异常类型 ==========
+
+
+class EventProcessingError(AILifeError):
+    """事件处理错误。
+
+    当事件解析、验证或处理失败时抛出。
+    """
+
+    def __init__(self, message: str, event_data: Optional[str] = None):
+        hint = "事件数据可能已损坏，建议检查 event_log.jsonl"
+        super().__init__(message, hint)
+        self.event_data = event_data
+
+
+class FileOperationError(AILifeError):
+    """文件操作错误。
+
+    当文件读取、写入或操作失败时抛出。
+    """
+
+    def __init__(self, message: str, file_path: Optional[str] = None):
+        hint = f"请检查文件: {file_path}" if file_path else "请检查文件路径和权限"
+        super().__init__(message, hint)
+        self.file_path = file_path
+
+
+class GoalOperationError(AILifeError):
+    """目标操作错误。
+
+    当目标创建、更新或删除失败时抛出。
+    """
+
+    def __init__(self, message: str, goal_id: Optional[str] = None):
+        hint = "目标操作失败，请检查目标数据"
+        super().__init__(message, hint)
+        self.goal_id = goal_id
+
+
+class PerformanceError(AILifeError):
+    """性能相关错误。
+
+    当性能监控或性能阈值超限时抛出。
+    """
+
+    def __init__(self, message: str, metric_name: Optional[str] = None):
+        hint = "性能问题，请检查系统资源"
+        super().__init__(message, hint)
+        self.metric_name = metric_name
+
+
+class ValidationError(AILifeError):
+    """数据验证错误。
+
+    当数据验证失败时抛出。
+    """
+
+    def __init__(self, message: str, field_name: Optional[str] = None):
+        hint = f"请检查字段: {field_name}" if field_name else "请检查数据格式"
+        super().__init__(message, hint)
+        self.field_name = field_name

@@ -16,7 +16,7 @@ from core.goal_generator import GoalGenerator
 from core.models import Goal as DecompositionGoal
 from core.models import GoalStatus, UserProfile
 from core.objective_engine.models import GoalLayer, GoalSource, GoalState, ObjectiveNode
-from core.objective_engine.registry import GoalRegistry
+from core.objective_engine.registry import GoalRegistry, get_registry
 from core.task_decomposer import TaskDecomposer
 
 
@@ -24,7 +24,7 @@ class GoalService:
     """Application service for canonical goal operations."""
 
     def __init__(self, registry: Optional[GoalRegistry] = None):
-        self.registry = registry or GoalRegistry()
+        self.registry = registry or get_registry()
         try:
             self.anchor_manager: Optional[AnchorManager] = AnchorManager()
         except Exception:

@@ -248,24 +248,29 @@ def apply_event(state: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
 def rebuild_state() -> Dict[str, Any]:
     """
     Rebuild state from event log.
+
+    Phase 8增强：添加性能监控。
     """
-    state = get_initial_state()
+    from core.performance_monitor import PerformanceTracker, MetricNames
 
-    if not EVENT_LOG_PATH.exists():
+    with PerformanceTracker(MetricNames.EVENT_RECONSTRUCTION_TIME):
+        state = get_initial_state()
+
+        if not EVENT_LOG_PATH.exists():
+            return state
+
+        with open(EVENT_LOG_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                    state = apply_event(state, event)
+                except Exception as e:
+                    logger.error(f"Failed to process event: {line[:100]}... Error: {e}")
+                    continue
+
         return state
-
-    with open(EVENT_LOG_PATH, "r", encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            try:
-                event = json.loads(line)
-                state = apply_event(state, event)
-            except Exception as e:
-                logger.error(f"Failed to process event: {line[:100]}... Error: {e}")
-                continue
-
-    return state
 
 def validate_event_shape(event: Dict[str, Any], strict: bool = False) -> Dict[str, Any]:
     """

@@ -150,6 +150,7 @@ export default function Home() {
     const [l2ResumeStep, setL2ResumeStep] = useState('');
     const [l2CompletionReflection, setL2CompletionReflection] = useState('');
     const [recoveryBatchLoading, setRecoveryBatchLoading] = useState(false);
+    const [safeModeExiting, setSafeModeExiting] = useState(false);
 
     const signalNameMap = {
         repeated_skip: '重复跳过',
@@ -160,6 +161,11 @@ export default function Home() {
         gentle_nudge: '温和提醒',
         firm_reminder: '坚定提醒',
         periodic_check: '周期检查'
+    };
+    const escalationDescriptionMap = {
+        gentle_nudge: '系统以温和方式提醒，不施加压力',
+        firm_reminder: '系统坚定地提醒，但保持尊重',
+        periodic_check: '系统降低干预频率，定期检查状态'
     };
     const responseContextLabelMap = {
         recovering: '恢复精力',
@@ -493,6 +499,21 @@ export default function Home() {
             setError('应用恢复批处理失败: ' + (e.response?.data?.detail || e.message));
         } finally {
             setRecoveryBatchLoading(false);
+        }
+    };
+
+    const handleExitSafeMode = async () => {
+        if (safeModeExiting) return;
+        try {
+            setSafeModeExiting(true);
+            setError(null);
+            await api.post('/safe-mode/exit', { reason: 'user_initiated' });
+            await fetchAll();
+        } catch (e) {
+            console.error(e);
+            setError('退出 Safe Mode 失败: ' + (e.response?.data?.detail || e.message));
+        } finally {
+            setSafeModeExiting(false);
         }
     };
 
@@ -1667,6 +1688,43 @@ export default function Home() {
                         Guardian 复盘
                     </h4>
                     <div className="glass-card" style={{ padding: '1rem' }}>
+                        {/* Safe Mode Banner */}
+                        {guardianSafeMode.active && (
+                            <div style={{
+                                background: '#fef3c7',
+                                border: '1px solid #f59e0b',
+                                borderRadius: '8px',
+                                padding: '1rem',
+                                marginBottom: '1rem',
+                                display: 'flex',
+                                gap: '0.75rem',
+                                alignItems: 'flex-start'
+                            }}>
+                                <div style={{ fontSize: '1.5rem' }}>⚠️</div>
+                                <div style={{ flex: 1 }}>
+                                    <div style={{ fontWeight: 600, marginBottom: '0.25rem', color: '#92400e' }}>
+                                        Safe Mode 已激活
+                                    </div>
+                                    <div style={{ fontSize: '0.85rem', color: '#78350f', marginBottom: '0.5rem' }}>
+                                        {guardianSafeMode.reason || '系统检测到持续对抗，已降低干预强度'}
+                                    </div>
+                                    <div style={{ fontSize: '0.75rem', color: '#92400e', marginBottom: '0.75rem' }}>
+                                        进入时间: {guardianSafeMode.entered_at || '--'}
+                                        {guardianSafeMode.cooldown_complete && ' · 冷却已完成'}
+                                    </div>
+                                    {guardianSafeMode.cooldown_complete && (
+                                        <button
+                                            onClick={handleExitSafeMode}
+                                            disabled={safeModeExiting}
+                                            className="btn btn-secondary"
+                                            style={{ fontSize: '0.85rem', background: '#fff', borderColor: '#f59e0b', color: '#92400e' }}
+                                        >
+                                            {safeModeExiting ? '退出中...' : '退出 Safe Mode'}
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        )}
                         <p style={{ margin: '0 0 0.75rem 0', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                             最近 {retrospective.period?.days ?? 7} 天 · {retrospective.period?.start_date ?? ''} 至 {retrospective.period?.end_date ?? ''}
                         </p>
@@ -1687,8 +1745,15 @@ export default function Home() {
                                 <div style={{ fontSize: '0.86rem', fontWeight: 600 }}>{guardianEscalationLabel}</div>
                             </div>
                             <div style={{ marginTop: '0.25rem', fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
+                                {escalationDescriptionMap[guardianEscalationStage] || '暂无说明'}
+                            </div>
+                            <div style={{ marginTop: '0.15rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
                                 窗口 {guardianEscalation.window_days ?? 7} 天 · 抵抗 {guardianEscalation.resistance_count ?? 0}
                                 / 响应 {guardianEscalation.response_count ?? 0}
+                            </div>
+                            <div style={{ marginTop: '0.15rem', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                升级条件: 坚定提醒 ≥{guardianEscalation.firm_reminder_resistance ?? 2}次抵抗 · 
+                                周期检查 ≥{guardianEscalation.periodic_check_resistance ?? 4}次抵抗
                             </div>
                         </div>
                         <div

@@ -1,0 +1,72 @@
+# 文件传感器配置
+# File Sensor Configuration for AI Life OS
+# Version: 1.0
+# Created: 2026-03-06
+
+# 监控路径配置
+watch_paths:
+  # 核心数据文件
+  - path: "data/event_log.jsonl"
+    enabled: true
+    recursive: false
+    description: "事件日志文件"
+
+  - path: "data/goal_registry.json"
+    enabled: true
+    recursive: false
+    description: "目标注册表"
+
+  - path: "data/snapshots"
+    enabled: true
+    recursive: true
+    description: "快照目录"
+
+  # 扩展监控文件（Phase 7新增）
+  - path: "data/authority_log.jsonl"
+    enabled: true
+    recursive: false
+    description: "Authority干预日志"
+
+  - path: "data/retrospective_history.jsonl"
+    enabled: true
+    recursive: false
+    description: "复盘历史记录"
+
+  - path: "data/performance_metrics.json"
+    enabled: true
+    recursive: false
+    description: "性能指标数据"
+
+  - path: "config"
+    enabled: true
+    recursive: true
+    description: "配置文件目录"
+
+  - path: "logs"
+    enabled: true
+    recursive: true
+    description: "日志文件目录"
+
+# 实时监控配置
+realtime:
+  enabled: true
+  debounce_ms: 100  # 防抖延迟（毫秒）
+  max_events_per_second: 100  # 每秒最大事件数
+
+# 轮询配置（回退模式）
+polling:
+  enabled: true
+  interval_seconds: 5  # 轮询间隔（秒）
+
+# 性能配置
+performance:
+  max_history_days: 7  # 变更历史保留天数
+  max_history_size: 10000  # 最大历史记录数
+  batch_size: 100  # 批量处理大小
+
+# 日志配置
+logging:
+  level: "INFO"
+  file: "logs/file_sensor.log"
+  max_size_mb: 10
+  backup_count: 5

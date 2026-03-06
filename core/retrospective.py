@@ -281,15 +281,11 @@ def _event_evidence(event: Dict[str, Any], detail: str) -> Dict[str, Any]:
 
 
 def _load_blueprint_config() -> Dict[str, Any]:
+    """加载blueprint配置，使用缓存机制。"""
+    from core.config_cache import load_yaml_with_cache
+
     config_path = Path(__file__).parent.parent / "config" / "blueprint.yaml"
-    if not config_path.exists():
-        return {}
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    return load_yaml_with_cache(config_path)
 
 
 def _coerce_int(
@@ -600,9 +596,9 @@ def _build_l2_reference_maps() -> Tuple[Dict[str, str], Dict[str, str]]:
     task_goal_by_task_id: Dict[str, str] = {}
 
     try:
-        from core.objective_engine.registry import GoalRegistry
+        from core.objective_engine.registry import get_registry
 
-        registry = GoalRegistry()
+        registry = get_registry()
         nodes = registry.visions + registry.objectives + registry.goals
         for node in nodes:
             goal_type_by_goal_id[node.id] = str(node.goal_type or "")
@@ -1077,6 +1073,184 @@ def _detect_deviation_signals(
     return signals
 
 
+def _detect_instinct_hijack_signals(
+    events: List[Dict[str, Any]],
+    days: int,
+    thresholds: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    检测本能劫持信号（Iteration 10）。
+
+    Args:
+        events: 事件列表
+        days: 分析时间窗口（天）
+        thresholds: 阈值配置
+
+    Returns:
+        劫持信号列表，每个信号包含 name, pattern, active, severity, count, threshold, summary, evidence
+    """
+    if thresholds is None:
+        thresholds = _guardian_thresholds(days)
+
+    hijack_thresholds = thresholds.get("instinct_hijack", {})
+    if not isinstance(hijack_thresholds, dict):
+        hijack_thresholds = {}
+
+    # 1. 检测任务放弃（Task Abandonment）
+    task_abandonment_signal = _detect_task_abandonment(events, days, hijack_thresholds)
+
+    # 2. 检测重复推迟建议（Repeated Dismiss）
+    repeated_dismiss_signal = _detect_repeated_dismiss(events, days, hijack_thresholds)
+
+    # 3. 检测L2娱乐切换（Entertainment Switch）- 暂不实现，需L2会话事件
+    # entertainment_switch_signal = _detect_entertainment_switch(events, days, hijack_thresholds)
+
+    signals = [
+        task_abandonment_signal,
+        repeated_dismiss_signal,
+    ]
+
+    return [s for s in signals if s and s.get("active")]
+
+
+def _detect_task_abandonment(
+    events: List[Dict[str, Any]],
+    days: int,
+    thresholds: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    检测任务放弃行为：任务创建后未完成就跳过/删除。
+
+    Args:
+        events: 事件列表
+        days: 分析时间窗口（天）
+        thresholds: 阈值配置
+
+    Returns:
+        任务放弃信号
+    """
+    task_created_events = {}
+    task_abandoned_events = []
+
+    # 收集任务创建和放弃事件
+    for event in events:
+        event_type = event.get("type")
+        payload = event.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
+
+        task_id = payload.get("task_id") or payload.get("id")
+        if not task_id:
+            continue
+
+        if event_type == "task_created":
+            task_created_events[task_id] = event
+        elif event_type == "task_updated":
+            status = payload.get("status")
+            if status in ("skipped", "deleted"):
+                # 检查是否有对应的创建事件
+                if task_id in task_created_events:
+                    task_abandoned_events.append({
+                        "created": task_created_events[task_id],
+                        "abandoned": event,
+                    })
+
+    # 统计放弃次数
+    abandonment_count = len(task_abandoned_events)
+    abandonment_threshold = _coerce_int(
+        thresholds.get("task_abandonment"),
+        default=2,
+        min_value=1,
+    )
+
+    active = abandonment_count >= abandonment_threshold
+
+    # 构建证据链
+    evidence = []
+    for item in task_abandoned_events[-3:]:  # 最多展示3个证据
+        created_ev = item["created"]
+        abandoned_ev = item["abandoned"]
+        evidence.append(_event_evidence(created_ev, "task created"))
+        evidence.append(_event_evidence(abandoned_ev, "task abandoned without completion"))
+
+    return {
+        "name": "instinct_hijack",
+        "pattern": "task_abandonment",
+        "active": active,
+        "severity": "high" if active else "info",
+        "count": abandonment_count,
+        "threshold": abandonment_threshold,
+        "summary": (
+            f"检测到 {abandonment_count} 次任务放弃行为，可能存在逃避倾向。"
+            if active
+            else f"未检测到明显的任务放弃行为（{abandonment_count} 次）。"
+        ),
+        "evidence": evidence,
+    }
+
+
+def _detect_repeated_dismiss(
+    events: List[Dict[str, Any]],
+    days: int,
+    thresholds: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    检测重复推迟/忽略Guardian建议的行为。
+
+    Args:
+        events: 事件列表
+        days: 分析时间窗口（天）
+        thresholds: 阈值配置
+
+    Returns:
+        重复推迟信号
+    """
+    dismiss_events = []
+
+    # 收集guardian_response事件
+    for event in events:
+        event_type = event.get("type")
+        if event_type != "guardian_response":
+            continue
+
+        payload = event.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
+
+        action = payload.get("action")
+        if action in ("snooze", "dismiss"):
+            dismiss_events.append(event)
+
+    # 统计推迟次数
+    dismiss_count = len(dismiss_events)
+    dismiss_threshold = _coerce_int(
+        thresholds.get("repeated_dismiss"),
+        default=3,
+        min_value=1,
+    )
+
+    active = dismiss_count >= dismiss_threshold
+
+    # 构建证据链
+    evidence = [_event_evidence(ev, f"guardian suggestion {ev.get('payload', {}).get('action', 'dismissed')}")
+                for ev in dismiss_events[-3:]]
+
+    return {
+        "name": "instinct_hijack",
+        "pattern": "repeated_dismiss",
+        "active": active,
+        "severity": "medium" if active else "info",
+        "count": dismiss_count,
+        "threshold": dismiss_threshold,
+        "summary": (
+            f"检测到 {dismiss_count} 次推迟/忽略Guardian建议，可能存在对抗倾向。"
+            if active
+            else f"未检测到明显的对抗行为（{dismiss_count} 次推迟）。"
+        ),
+        "evidence": evidence,
+    }
+
+
 def _l2_interruption_evidence(
     events: List[Dict[str, Any]],
     now: datetime,
@@ -1211,9 +1385,9 @@ def _guardian_alignment(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     """目标一致性：是否偏离 Vision/Objective。数据来源：事件 goal_id + GoalRegistry 树。"""
     registry = None
     try:
-        from core.objective_engine.registry import GoalRegistry
+        from core.objective_engine.registry import get_registry
         from core.objective_engine.models import GoalLayer
-        registry = GoalRegistry()
+        registry = get_registry()
     except Exception:
         pass
     goal_ids_from_events = set()
@@ -1257,9 +1431,9 @@ def _goal_alignment_trend(events: List[Dict[str, Any]], days: int) -> Dict[str, 
     Build a weekly trend view for goal-anchor alignment.
     """
     try:
-        from core.objective_engine.registry import GoalRegistry
+        from core.objective_engine.registry import get_registry
 
-        registry = GoalRegistry()
+        registry = get_registry()
         nodes = registry.visions + registry.objectives + registry.goals
         score_by_goal_id = {
             node.id: float(node.alignment_score)
@@ -1405,39 +1579,49 @@ def generate_guardian_retrospective(days: int = 7) -> Dict[str, Any]:
     """
     Guardian 复盘：派生视图，只读 event_log，不写入。
     输出契约见 .taskflow/active/next-version-plan/design.md §1.2。
+
+    Phase 7增强：添加性能监控。
     """
-    events = load_events_for_period(days)
-    now = datetime.now()
-    start_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
-    end_date = now.strftime("%Y-%m-%d")
-    thresholds = _guardian_thresholds(days)
+    from core.performance_monitor import PerformanceTracker, MetricNames
 
-    rhythm = _guardian_rhythm(events, days)
-    alignment = _guardian_alignment(events)
-    alignment["trend"] = _goal_alignment_trend(events, days)
-    friction = _guardian_friction(events)
-    l2_protection = _guardian_l2_protection(events, days, thresholds=thresholds)
-    l2_session = _guardian_l2_session(events)
-    deviation_signals = _detect_deviation_signals(events, days, thresholds=thresholds)
-    observations = _guardian_observations(
-        rhythm,
-        alignment,
-        friction,
-        l2_protection,
-        deviation_signals,
-    )
+    with PerformanceTracker(MetricNames.RETROSPECTIVE_GENERATION_TIME):
+        events = load_events_for_period(days)
+        now = datetime.now()
+        start_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+        end_date = now.strftime("%Y-%m-%d")
+        thresholds = _guardian_thresholds(days)
 
-    return {
-        "period": {"days": days, "start_date": start_date, "end_date": end_date},
-        "generated_at": now.isoformat(),
-        "rhythm": rhythm,
-        "alignment": alignment,
-        "friction": friction,
-        "l2_protection": l2_protection,
-        "l2_session": l2_session,
-        "deviation_signals": deviation_signals,
-        "observations": observations,
-    }
+        rhythm = _guardian_rhythm(events, days)
+        alignment = _guardian_alignment(events)
+        alignment["trend"] = _goal_alignment_trend(events, days)
+        friction = _guardian_friction(events)
+        l2_protection = _guardian_l2_protection(events, days, thresholds=thresholds)
+        l2_session = _guardian_l2_session(events)
+        deviation_signals = _detect_deviation_signals(events, days, thresholds=thresholds)
+
+        # Iteration 10: 新增本能劫持检测
+        hijack_signals = _detect_instinct_hijack_signals(events, days, thresholds=thresholds)
+        deviation_signals.extend(hijack_signals)
+
+        observations = _guardian_observations(
+            rhythm,
+            alignment,
+            friction,
+            l2_protection,
+            deviation_signals,
+        )
+
+        return {
+            "period": {"days": days, "start_date": start_date, "end_date": end_date},
+            "generated_at": now.isoformat(),
+            "rhythm": rhythm,
+            "alignment": alignment,
+            "friction": friction,
+            "l2_protection": l2_protection,
+            "l2_session": l2_session,
+            "deviation_signals": deviation_signals,
+            "observations": observations,
+        }
 
 
 def get_intervention_level() -> str:
@@ -1900,6 +2084,25 @@ def _safe_mode_state_from_runtime() -> Dict[str, Any]:
     }
 
 
+def _get_last_escalation_stage(
+    events: List[Dict[str, Any]],
+    window_start: datetime,
+) -> Optional[str]:
+    """
+    获取上一次记录的干预级别（从事件日志中查找）。
+    """
+    for event in reversed(events):
+        if event.get("type") != "authority_escalation_changed":
+            continue
+        payload = event.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
+        new_stage = payload.get("new_stage")
+        if new_stage in ("gentle_nudge", "firm_reminder", "periodic_check"):
+            return new_stage
+    return None
+
+
 def _guardian_authority_snapshot(
     events: List[Dict[str, Any]],
     thresholds: Dict[str, Any],
@@ -1948,6 +2151,28 @@ def _guardian_authority_snapshot(
         stage = "firm_reminder"
     else:
         stage = "gentle_nudge"
+
+    # Iteration 12: 检查是否需要记录级别变化事件
+    old_stage = _get_last_escalation_stage(events, window_start)
+    if old_stage and old_stage != stage:
+        from core.event_sourcing import append_event
+        trigger = (
+            "resistance_threshold_reached"
+            if stage in ("firm_reminder", "periodic_check")
+            else "resistance_decreased"
+        )
+        event = {
+            "type": "authority_escalation_changed",
+            "timestamp": now.isoformat(),
+            "payload": {
+                "old_stage": old_stage,
+                "new_stage": stage,
+                "resistance_count": resistance_count,
+                "response_count": response_count,
+                "trigger": trigger,
+            }
+        }
+        append_event(event)
 
     safe_mode_enabled = _coerce_bool(thresholds.get("safe_mode_enabled"), True)
     safe_mode_resistance_threshold = _coerce_int(
@@ -3559,4 +3784,22 @@ def build_guardian_retrospective_response(days: int = 7) -> Dict[str, Any]:
         intervention_policy=intervention_policy,
     )
     raw["authority"] = authority
+
+    # Iteration 16: 添加文件传感器信号
+    try:
+        from core.file_sensor import analyze_file_signals
+        file_signals = analyze_file_signals(window_hours=24)
+        raw["file_sensor_signals"] = [
+            {
+                "signal_type": signal.signal_type.value,
+                "confidence": signal.confidence,
+                "summary": signal.summary,
+                "evidence_count": len(signal.evidence),
+                "timestamp": signal.timestamp.isoformat(),
+            }
+            for signal in file_signals
+        ]
+    except Exception:
+        raw["file_sensor_signals"] = []
+
     return raw

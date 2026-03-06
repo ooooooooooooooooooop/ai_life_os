@@ -3,15 +3,15 @@ from unittest.mock import patch, MagicMock
 from core.steward import Steward
 from core.strategic_engine.vision_inference import InferredVision
 
-@patch("core.steward.GoalRegistry")
+@patch("core.steward.get_registry")
 @patch("core.strategic_engine.vision_inference.infer_vision")
-def test_steward_integration_vision(mock_infer, mock_registry_cls):
+def test_steward_integration_vision(mock_infer, mock_get_registry):
     # Setup Registry (Empty)
     mock_registry = MagicMock()
     mock_registry.goals = []
     mock_registry.visions = []
     mock_registry.objectives = []
-    mock_registry_cls.return_value = mock_registry
+    mock_get_registry.return_value = mock_registry
     
     # Setup Vision Inference
     vision = InferredVision(

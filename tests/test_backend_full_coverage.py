@@ -2,7 +2,7 @@
 import pytest
 from fastapi.testclient import TestClient
 from web.backend.app import app
-from core.objective_engine.registry import GoalRegistry
+from core.objective_engine.registry import get_registry, clear_registry
 from core.objective_engine.models import GoalState, GoalLayer, ObjectiveNode
 import uuid
 import time
@@ -11,9 +11,9 @@ import os
 client = TestClient(app)
 
 @pytest.fixture
-def mock_registry():
+def mock_registry(clear_goal_registry_singleton):
     """Ensure we have a clean state with some known data for testing."""
-    registry = GoalRegistry()
+    registry = get_registry()
     # Add a dummy vision
     vision_id = f"vis_{uuid.uuid4()}"
     vision = ObjectiveNode(
@@ -85,42 +85,45 @@ def test_confirm_goal(mock_registry):
     assert data["status"] == "confirmed"
     
     # Verify state change
-    reg = GoalRegistry()
+    reg = get_registry()
     node = reg.get_node(gid)
     assert node.state == GoalState.ACTIVE
 
 def test_reject_goal(mock_registry):
-    # Need another pending goal for rejection test to assume isolation, 
+    # Need another pending goal for rejection test to assume isolation,
     # but let's create a new one on fly to be safe
-    reg = GoalRegistry()
+    from core.objective_engine.registry import get_registry as get_reg
+    reg = get_reg()
     reject_id = f"goal_reject_{uuid.uuid4()}"
     node = ObjectiveNode(
         id=reject_id, title="To Reject", description="..", 
         layer=GoalLayer.GOAL, state=GoalState.VISION_PENDING_CONFIRMATION
     )
     reg.add_node(node)
-    
+
     response = client.post(f"/api/v1/goals/{reject_id}/reject")
     assert response.status_code == 200
-    
+
     # Reload registry to verify persistence
-    reg_new = GoalRegistry()
+    from core.objective_engine.registry import get_registry as get_reg2
+    reg_new = get_reg2()
     node_check = reg_new.get_node(reject_id)
     assert node_check.state == GoalState.ARCHIVED
 
-def test_submit_feedback(mock_registry):
+def test_submit_feedback(mock_registry, clear_goal_registry_singleton):
     gid = mock_registry["active_goal_id"]
     # Intent: COMPLETE
     response = client.post(f"/api/v1/goals/{gid}/feedback", json={"message": "I finished this task"})
     assert response.status_code == 200
     data = response.json()
-    # Note: Depending on LLM/Mock, intent might differ. 
+    # Note: Depending on LLM/Mock, intent might differ.
     # But usually "I finished" -> COMPLETE
     # If using regex/keyword classifier, it should work.
-    
+
     # Intent: SKIP
     # Reset goal or use another
-    reg = GoalRegistry()
+    from core.objective_engine.registry import get_registry
+    reg = get_registry()
     skip_id = f"goal_skip_{uuid.uuid4()}"
     reg.add_node(ObjectiveNode(
         id=skip_id, 

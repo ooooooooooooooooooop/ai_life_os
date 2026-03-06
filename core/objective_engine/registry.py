@@ -5,11 +5,16 @@ Path: <AI_LIFE_OS_DATA_DIR>/goal_registry.json (or ./data by default).
 from pathlib import Path
 from typing import List, Optional
 import json
+import threading
 
 from core.objective_engine.models import ObjectiveNode, GoalLayer, GoalState
 from core.paths import DATA_DIR
 
 REGISTRY_PATH = DATA_DIR / "goal_registry.json"
+
+# 单例相关变量
+_registry_instance: Optional["GoalRegistry"] = None
+_registry_lock = threading.Lock()
 
 
 def _node_to_dict(n: ObjectiveNode) -> dict:
@@ -134,3 +139,29 @@ class GoalRegistry:
     @property
     def goals(self) -> List[ObjectiveNode]:
         return [n for n in self._nodes.values() if n.layer == GoalLayer.GOAL]
+
+
+def get_registry() -> GoalRegistry:
+    """
+    获取GoalRegistry单例实例。
+
+    Returns:
+        GoalRegistry单例实例
+    """
+    global _registry_instance
+    if _registry_instance is None:
+        with _registry_lock:
+            if _registry_instance is None:
+                _registry_instance = GoalRegistry()
+    return _registry_instance
+
+
+def clear_registry() -> None:
+    """
+    清除GoalRegistry单例实例。
+
+    主要用于测试场景，确保每次测试都有干净的环境。
+    """
+    global _registry_instance
+    with _registry_lock:
+        _registry_instance = None

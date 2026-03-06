@@ -12,6 +12,9 @@ guardian_thresholds:
     repeated_skip: 2
     l2_interruption: 1
     stagnation_days: 3
+  instinct_hijack:
+    task_abandonment: 2        # 任务放弃阈值（次/周）
+    repeated_dismiss: 3        # 重复推迟阈值（次/周）
   l2_protection:
     high: 0.75
     medium: 0.50

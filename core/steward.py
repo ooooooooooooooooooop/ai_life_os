@@ -22,7 +22,7 @@ from core.goal_decomposer import GoalType
 
 import uuid
 from core.utils import load_prompt, parse_llm_json
-from core.objective_engine.registry import GoalRegistry
+from core.objective_engine.registry import GoalRegistry, get_registry
 from core.objective_engine.models import GoalState
 from core.strategic_engine.bhb_parser import parse_bhb
 from core.rule_evaluator import RuleEvaluator
@@ -67,7 +67,7 @@ class Steward:
     def __init__(self, state: Dict[str, Any], registry: Optional[GoalRegistry] = None):
         self.state = state
         self.used_fields: List[str] = []
-        self.registry = registry or GoalRegistry()
+        self.registry = registry or get_registry()
         self._rule_evaluator = RuleEvaluator()
         self._goal_engine = None
         try:
