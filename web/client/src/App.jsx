@@ -6,6 +6,7 @@ import { api } from './utils/api';
 import Navbar from './components/Navbar';
 import { ToastProvider } from './components/Toast';
 import ErrorBoundary from './components/ErrorBoundary';
+import OnboardingTour from './components/OnboardingTour';
 
 // Pages
 import Home from './pages/Home';
@@ -69,6 +70,9 @@ function App() {
               <Route path="/goals/:goalId/decompose" element={<GoalDecompose />} />
             </Routes>
           </main>
+
+          {/* Onboarding Tour */}
+          {location.pathname !== '/onboarding' && <OnboardingTour />}
         </div>
       </ToastProvider>
     </ErrorBoundary>
