@@ -20,6 +20,7 @@ import yaml
 from core.config_manager import config
 from core.event_sourcing import EVENT_LOG_PATH, rebuild_state
 from core.llm_adapter import get_llm
+from core.persona_loader import get_guardian_system_prompt
 from core.signal_detector import (
     detect_deviation_signals,
     detect_instinct_hijack_signals,
@@ -919,9 +920,11 @@ def generate_ai_insights(report: Dict[str, Any]) -> str:
 3. 给出 1-2 个具体可行的改进建议
 """
 
-    system_prompt = """你是 AI Life OS 的复盘助手。
+    _persona = get_guardian_system_prompt("retrospective_requested")
+    _task_prompt = """你是 AI Life OS 的复盘助手。
 分析用户的执行数据，给出客观、可行的改进建议。
 保持简洁，避免空洞的建议。"""
+    system_prompt = f"{_persona}\n\n---\n\n{_task_prompt}" if _task_prompt else _persona
 
     response = llm.generate(
         prompt=prompt,
@@ -1180,6 +1183,9 @@ def generate_guardian_retrospective(days: int = 7) -> Dict[str, Any]:
         end_date = now.strftime("%Y-%m-%d")
         thresholds = get_guardian_thresholds(days)
 
+        # Memory 语义搜索增强
+        memory_insights = _memory_semantic_search(events, days)
+
         rhythm = _guardian_rhythm(events, days)
         alignment = _guardian_alignment(events)
         alignment["trend"] = _goal_alignment_trend(events, days)
@@ -1204,7 +1210,7 @@ def generate_guardian_retrospective(days: int = 7) -> Dict[str, Any]:
             deviation_signals,
         )
 
-        return {
+        report = {
             "period": {"days": days, "start_date": start_date, "end_date": end_date},
             "generated_at": now.isoformat(),
             "rhythm": rhythm,
@@ -1214,7 +1220,14 @@ def generate_guardian_retrospective(days: int = 7) -> Dict[str, Any]:
             "l2_session": l2_session,
             "deviation_signals": deviation_signals,
             "observations": observations,
+            "memory_insights": memory_insights,
         }
+
+        # 更新 USER.md 行为画像
+        from core.user_profile_updater import update_user_profile
+        update_user_profile(report)
+
+        return report
 
 
 def get_intervention_level() -> str:
@@ -3396,3 +3409,64 @@ def build_guardian_retrospective_response(days: int = 7) -> Dict[str, Any]:
         raw["file_sensor_signals"] = []
 
     return raw
+
+
+def _memory_semantic_search(events: List[Dict[str, Any]], days: int) -> List[Dict[str, Any]]:
+    """
+    Memory 语义搜索增强。
+
+    调用 memory_indexer.sync() 确保最新事件已索引,
+    用固定查询做语义检索,补充规则检测可能漏掉的模式。
+
+    Args:
+        events: 事件列表
+        days: 分析时间窗口（天）
+
+    Returns:
+        memory_insights 列表,每项包含 query、results
+    """
+    memory_insights = []
+
+    try:
+        # 1. 同步最新事件到 Memory
+        from core.memory_indexer import sync_memory as do_sync_memory
+        do_sync_memory()
+
+        # 2. 执行固定查询
+        from core.memory_store import get_memory_store
+
+        store = get_memory_store()
+        queries = [
+            "重复跳过任务",
+            "本能劫持 娱乐 分心",
+            "停滞 没有进展",
+        ]
+
+        for query in queries:
+            try:
+                results = store.search(query, top_k=3)
+                if results:
+                    memory_insights.append({
+                        "query": query,
+                        "results": [
+                            {
+                                "event_id": r.get("event_id"),
+                                "event_type": r.get("event_type"),
+                                "timestamp": r.get("timestamp"),
+                                "text": r.get("text"),
+                                "score": r.get("score"),
+                            }
+                            for r in results
+                        ]
+                    })
+            except Exception as e:
+                # 单个查询失败不影响其他查询
+                print(f"[MemorySearch] 查询 '{query}' 失败: {e}")
+                continue
+
+    except Exception as e:
+        # Memory 不可用时不报错,返回空列表
+        print(f"[MemorySearch] Memory 语义搜索失败: {e}")
+        return []
+
+    return memory_insights

@@ -47,6 +47,10 @@ class LLMProvider(Protocol):
         """Return the model name."""
         ...
 
+    def get_embedding(self, text: str) -> list:
+        """Get embedding vector for text."""
+        ...
+
 
 class BaseLLMAdapter(ABC):
     """Base class for LLM adapters."""
@@ -68,6 +72,13 @@ class BaseLLMAdapter(ABC):
 
     def get_model_name(self) -> str:
         return self.model_name
+
+    def get_embedding(self, text: str) -> list:
+        """
+        Get embedding vector for text.
+        Subclasses can override this method.
+        """
+        raise NotImplementedError("Embedding not supported by this adapter")
 
 
 class OpenAIAdapter(BaseLLMAdapter):
@@ -187,6 +198,36 @@ class OpenAIAdapter(BaseLLMAdapter):
                 endpoint=self.base_url
             )
 
+    def get_embedding(self, text: str) -> list:
+        """Get embedding using OpenAI embedding API."""
+        try:
+            import httpx
+        except ImportError:
+            raise ImportError("httpx not installed. Run: pip install httpx")
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "model": "text-embedding-3-small",
+            "input": text
+        }
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    f"{self.base_url}/embeddings",
+                    headers=headers,
+                    json=payload
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data["data"][0]["embedding"]
+        except Exception as e:
+            raise RuntimeError(f"Failed to get embedding: {e}")
+
 
 class OllamaAdapter(BaseLLMAdapter):
     """Adapter for local Ollama models."""
@@ -267,6 +308,30 @@ class OllamaAdapter(BaseLLMAdapter):
                 model_name=self.model_name,
                 endpoint=self.base_url
             )
+
+    def get_embedding(self, text: str) -> list:
+        """Get embedding using Ollama embedding API."""
+        try:
+            import httpx
+        except ImportError:
+            raise ImportError("httpx not installed. Run: pip install httpx")
+
+        payload = {
+            "model": "nomic-embed-text",  # Ollama 常用 embedding 模型
+            "prompt": text
+        }
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    f"{self.base_url}/api/embeddings",
+                    json=payload
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data.get("embedding", [])
+        except Exception as e:
+            raise RuntimeError(f"Failed to get embedding from Ollama: {e}")
 
 
 class RuleBasedAdapter(BaseLLMAdapter):

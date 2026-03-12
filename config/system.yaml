@@ -35,3 +35,8 @@ priority_order:
   - maintenance  # 系统稳定维护
   - rhythm       # 延续已有节律
   - exploration  # 新引入行动
+
+# Telegram Bot 配置
+telegram:
+  bot_token: ""     # 填入 Bot Token
+  chat_id: ""       # 填入 Chat ID

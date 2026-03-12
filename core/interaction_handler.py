@@ -27,6 +27,8 @@ Current System State:
 Current Active Goals:
 {active_goals}
 
+{mood_hint}
+
 User Message: "{user_message}"
 
 Determine the user's intent:
@@ -114,6 +116,10 @@ class InteractionHandler:
                 # Handle cancellation
                 result.reply = "Action cancelled."
 
+            # 对话记忆摘要
+            from core.conversation_summarizer import summarize_and_save
+            summarize_and_save(message, result.reply, result.intent)
+
             return InteractionResponse(
                 response_text=result.reply,
                 action_type=result.intent,
@@ -136,9 +142,14 @@ class InteractionHandler:
         self, message: str, state_summary: str, active_goals: List[str]
     ) -> InteractionResponse:
         """Process message using legacy method (backward compatibility)."""
+        from core.mood_detector import detect_mood
+        mood = detect_mood(message)
+        mood_hint = f"用户当前情绪状态检测：{mood}，请相应调整回复语气。"
+
         prompt = PROMPT_TEMPLATE.format(
             state_summary=state_summary,
             active_goals="\n".join(active_goals) if active_goals else "None",
+            mood_hint=mood_hint,
             user_message=message
         )
 
@@ -184,6 +195,10 @@ class InteractionHandler:
             elif intent == "GOAL_FEEDBACK":
                 self._handle_goal_feedback(updates)
                 updated_fields = list(updates.keys())
+
+            # 对话记忆摘要
+            from core.conversation_summarizer import summarize_and_save
+            summarize_and_save(message, reply, intent)
 
             return InteractionResponse(
                 response_text=reply,

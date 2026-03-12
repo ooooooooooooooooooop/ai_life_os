@@ -19,6 +19,7 @@ from core.bootstrap import is_cold_start, get_bootstrap_tasks
 from core.llm_adapter import get_llm
 from core.config_manager import config
 from core.goal_decomposer import GoalType
+from core.persona_loader import get_guardian_system_prompt
 
 import uuid
 from core.utils import load_prompt, parse_llm_json
@@ -590,7 +591,9 @@ class Steward:
         if llm.get_model_name() == "rule_based":
             return actions
 
-        system_prompt = load_prompt("rhythm_analysis")
+        _persona = get_guardian_system_prompt("has_active_tasks")
+        _task_prompt = load_prompt("rhythm_analysis")
+        system_prompt = f"{_persona}\n\n---\n\n{_task_prompt}" if _task_prompt else _persona
         if not system_prompt:
             return actions
 
@@ -660,13 +663,15 @@ class Steward:
                 )
             return actions
 
-        system_prompt_template = load_prompt("exploration_suggest")
-        if not system_prompt_template:
+        _persona = get_guardian_system_prompt("idle_state")
+        _task_prompt_template = load_prompt("exploration_suggest")
+        if not _task_prompt_template:
             return actions
 
-        system_prompt = system_prompt_template.format(
+        _task_prompt = _task_prompt_template.format(
             min_task_duration=config.MIN_TASK_DURATION
         )
+        system_prompt = f"{_persona}\n\n---\n\n{_task_prompt}" if _task_prompt else _persona
 
         identity = self._get_field("identity") or {}
         skills = self._get_field("capability.skills") or []
@@ -756,9 +761,10 @@ Generate 1-2 concrete exploration actions.
             )
 
         llm = get_llm("strategic_brain")
-        prompt_template = load_prompt("bhb_engagement")
+        _persona = get_guardian_system_prompt("idle_state")
+        _task_prompt_template = load_prompt("bhb_engagement")
 
-        if not prompt_template:
+        if not _task_prompt_template:
             return [
                 {
                     "id": f"bhb_fallback_{uuid.uuid4()}",
@@ -767,13 +773,14 @@ Generate 1-2 concrete exploration actions.
                 }
             ]
 
-        prompt = prompt_template.format(
+        _task_prompt = _task_prompt_template.format(
             current_time=datetime.now().strftime("%H:%M"),
             energy_phase=phase,
             context_summary=context_summary,
             bhb_philosophy=bhb_config.philosophy,
             bhb_goals="\n".join(bhb_config.strategic_goals),
         )
+        prompt = f"{_persona}\n\n---\n\n{_task_prompt}" if _task_prompt else _persona
 
         try:
             response = llm.generate(prompt, temperature=0.85)

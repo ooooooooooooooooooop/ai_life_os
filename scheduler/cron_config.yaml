@@ -1,0 +1,21 @@
+# Cron Scheduler Configuration for AI Life OS
+#
+# 定时任务配置文件
+# cron 表达式格式: "分 时 日 月 周"
+# 例如:
+#   "0 21 * * *"    - 每天 21:00
+#   "0 20 * * 0"    - 每周日 20:00
+#   "30 8 * * 1-5"  - 周一到周五 08:30
+
+jobs:
+  - name: daily-retrospective
+    cron: "0 21 * * *"
+    enabled: true
+
+  - name: weekly-retrospective
+    cron: "0 20 * * 0"
+    enabled: true
+
+# Telegram 通知配置
+telegram:
+  enabled: true  # false 则只打 log 不发消息
