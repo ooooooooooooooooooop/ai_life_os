@@ -151,6 +151,7 @@ export default function Home() {
     const [l2CompletionReflection, setL2CompletionReflection] = useState('');
     const [recoveryBatchLoading, setRecoveryBatchLoading] = useState(false);
     const [safeModeExiting, setSafeModeExiting] = useState(false);
+    const [isLive, setIsLive] = useState(false);
 
     const signalNameMap = {
         repeated_skip: '重复跳过',
@@ -237,6 +238,44 @@ export default function Home() {
 
     useEffect(() => {
         fetchAll();
+    }, []);
+
+    // Guardian 实时推送
+    useEffect(() => {
+        const es = new EventSource('/api/v1/events');
+
+        es.onopen = () => {
+            setIsLive(true);
+        };
+
+        es.onmessage = (e) => {
+            try {
+                const event = JSON.parse(e.data);
+                const type = event?.type;
+
+                // 以下事件类型触发局部刷新
+                const TRIGGER_TYPES = new Set([
+                    'conversation_turn',
+                    'authority_escalation_changed',
+                    'safe_mode_entered',
+                    'safe_mode_exited',
+                    'guardian_response',
+                    'task_updated',
+                    'goal_completed',
+                ]);
+
+                if (TRIGGER_TYPES.has(type)) {
+                    fetchAll();
+                }
+            } catch (_) {}
+        };
+
+        es.onerror = () => {
+            // 连接断开，浏览器会自动重连
+            setIsLive(false);
+        };
+
+        return () => es.close();   // 组件卸载时清理
     }, []);
 
     useEffect(() => {
@@ -1684,9 +1723,21 @@ export default function Home() {
 
             {retrospective && (
                 <section style={{ marginTop: '2rem' }}>
-                    <h4 style={{ color: 'var(--accent-color)', marginBottom: '0.75rem', fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: '1px' }}>
-                        Guardian 复盘
-                    </h4>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                        <h4 style={{ color: 'var(--accent-color)', margin: 0, fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                            Guardian 复盘
+                        </h4>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem', color: isLive ? '#86efac' : 'var(--text-secondary)' }}>
+                            <span style={{
+                                width: '8px',
+                                height: '8px',
+                                borderRadius: '50%',
+                                background: isLive ? '#22c55e' : '#64748b',
+                                boxShadow: isLive ? '0 0 6px #22c55e' : 'none'
+                            }} />
+                            <span>{isLive ? 'Guardian 实时监听中' : '连接断开'}</span>
+                        </div>
+                    </div>
                     <div className="glass-card" style={{ padding: '1rem' }}>
                         {/* Safe Mode Banner */}
                         {guardianSafeMode.active && (

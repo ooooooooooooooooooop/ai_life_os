@@ -896,7 +896,7 @@ def generate_ai_insights(report: Dict[str, Any]) -> str:
     Returns:
         AI-generated insights text.
     """
-    llm = get_llm("long_memory")
+    llm = get_llm("long_memory", task_type="guardian")
 
     if llm.get_model_name() == "rule_based":
         # 规则模式：生成简单摘要

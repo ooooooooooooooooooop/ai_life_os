@@ -16,7 +16,7 @@ skip_pattern_context: []        # 跳过任务时的情境规律（时间段/前
 ## 观察到的本能劫持模式（系统归纳）
 
 hijack_triggers: ['连续跳过深度工作任务']  # 反复出现的跳过/放弃情境
-hijack_frequency: 1  # 本周劫持次数
+hijack_frequency: 0  # 本周劫持次数
 resistance_pattern: ""          # 对 Guardian 干预的响应模式：responsive/resistant/inconsistent
 
 ## 脚本重写进度（系统追踪）
@@ -32,5 +32,5 @@ language: "zh"
 
 ## 元数据
 
-last_observed: 2026-03-12  # 最后一次行为数据更新时间
-observation_sample_size: 42  # 已观察的事件总数（样本量越大归纳越可信）
+last_observed: 2026-03-18  # 最后一次行为数据更新时间
+observation_sample_size: 0  # 已观察的事件总数（样本量越大归纳越可信）

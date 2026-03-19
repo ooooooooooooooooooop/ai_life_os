@@ -3,10 +3,9 @@ Conversation Summarizer - 对话记忆摘要
 
 将用户对话写入事件日志并索引到 memory_store。
 """
-from typing import Optional
 
 
-def summarize_and_save(message: str, response: str, intent: str) -> None:
+def summarize_and_save(message: str, response: str, intent: str, mood: str = "neutral") -> None:
     """
     将对话轮次写入事件日志并同步到 memory。
 
@@ -14,6 +13,7 @@ def summarize_and_save(message: str, response: str, intent: str) -> None:
         message: 用户消息
         response: AI 回复
         intent: 意图类型
+        mood: 情绪状态（stressed/low/positive/neutral）
     """
     try:
         from core.event_sourcing import append_event
@@ -24,6 +24,7 @@ def summarize_and_save(message: str, response: str, intent: str) -> None:
             "user_message": message,
             "ai_response": response,
             "intent": intent,
+            "mood": mood,
         }
         append_event(event)
 

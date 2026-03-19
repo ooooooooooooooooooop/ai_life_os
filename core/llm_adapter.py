@@ -497,13 +497,29 @@ def create_llm_adapter(
 _llm_registry: Dict[str, BaseLLMAdapter] = {}
 _default_profile: Optional[str] = None
 
+# 任务类型到 Profile 的映射
+TASK_PROFILE_MAP = {
+    "guardian": "smart",      # Guardian 对话、复盘分析
+    "strategic": "smart",     # 战略规划、愿景推断
+    "decompose": "fast",      # 任务分解、结构化输出
+    "classify": "fast",       # 语义分类
+    "rhythm": "fast",         # 节律分析
+    "embedding": "embedding", # 向量嵌入
+    "default": None,          # 用 active_profile
+}
 
-def get_llm(profile_name: Optional[str] = None) -> BaseLLMAdapter:
+
+def get_llm(profile_name: Optional[str] = None, task_type: Optional[str] = None) -> BaseLLMAdapter:
     """
     Get or create an LLM adapter instance for the specified profile.
 
-    If profile_name is None, uses the 'active_profile' from config (global default).
-    If profile_name is provided, returns the specific instance for that profile.
+    Args:
+        profile_name: Optional profile name. If None, uses the 'active_profile' from config.
+        task_type: Optional task type for automatic profile routing.
+                   Maps to profile via TASK_PROFILE_MAP.
+
+    If task_type is provided, it takes priority for profile selection.
+    If the mapped profile doesn't exist, falls back to active_profile.
     Instances are cached in _llm_registry.
     """
     global _llm_registry, _default_profile
@@ -513,7 +529,28 @@ def get_llm(profile_name: Optional[str] = None) -> BaseLLMAdapter:
         config = load_model_config()
         _default_profile = config.get("active_profile", "simple_local")
 
-    target_profile = profile_name or _default_profile
+    # Determine target profile
+    target_profile = None
+
+    # 1. task_type routing (highest priority)
+    if task_type and task_type in TASK_PROFILE_MAP:
+        mapped_profile = TASK_PROFILE_MAP[task_type]
+        if mapped_profile:
+            # Check if profile exists in config
+            try:
+                test_config = load_model_config(mapped_profile)
+                if test_config.get("provider") != "rule_based":
+                    target_profile = mapped_profile
+            except Exception:
+                pass  # Fallback to default
+
+    # 2. Explicit profile_name
+    if target_profile is None and profile_name:
+        target_profile = profile_name
+
+    # 3. Default profile
+    if target_profile is None:
+        target_profile = _default_profile
 
     if target_profile not in _llm_registry:
         # Create new instance

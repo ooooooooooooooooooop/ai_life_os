@@ -57,7 +57,7 @@ class InteractionHandler:
         self.registry = registry
         self.state = state
         # Use Strategic Brain for better conversation context
-        self.llm = get_llm("strategic_brain")
+        self.llm = get_llm("strategic_brain", task_type="guardian")
 
         # Initialize enhanced intent recognizer
         self.use_enhanced = use_enhanced
@@ -116,9 +116,13 @@ class InteractionHandler:
                 # Handle cancellation
                 result.reply = "Action cancelled."
 
+            # 情绪感知
+            from core.mood_detector import detect_mood
+            mood = detect_mood(message)
+
             # 对话记忆摘要
             from core.conversation_summarizer import summarize_and_save
-            summarize_and_save(message, result.reply, result.intent)
+            summarize_and_save(message, result.reply, result.intent, mood)
 
             return InteractionResponse(
                 response_text=result.reply,
@@ -196,9 +200,9 @@ class InteractionHandler:
                 self._handle_goal_feedback(updates)
                 updated_fields = list(updates.keys())
 
-            # 对话记忆摘要
+            # 对话记忆摘要（mood 已在函数开头检测）
             from core.conversation_summarizer import summarize_and_save
-            summarize_and_save(message, reply, intent)
+            summarize_and_save(message, reply, intent, mood)
 
             return InteractionResponse(
                 response_text=reply,
@@ -239,3 +243,8 @@ class InteractionHandler:
             status = str(v).strip().lower()
             if status in {"complete", "skip", "blocked", "defer", "partial"}:
                 service.apply_feedback(k, status)
+
+                # 用户完成目标时，重置干预计数
+                if status == "complete":
+                    from core.intervention_tracker import record_acceptance
+                    record_acceptance(k)

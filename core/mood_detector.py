@@ -4,11 +4,11 @@ Mood Detector - 情绪状态感知
 基于关键词的轻量级情绪检测（不调用 LLM）。
 """
 
-# 情绪关键词映射
+# 情绪关键词映射（中英文）
 MOOD_KEYWORDS = {
-    "stressed": ["好累", "压力", "焦虑", "不行了", "撑不住", "烦"],
-    "low": ["没意思", "放弃", "算了", "躺平", "不想动"],
-    "positive": ["做到了", "完成了", "爽", "冲", "搞定"],
+    "stressed": ["好累", "压力", "焦虑", "不行了", "撑不住", "烦", "tired", "stressed", "anxious", "overwhelmed"],
+    "low": ["没意思", "放弃", "算了", "躺平", "不想动", "give up", "pointless", "whatever"],
+    "positive": ["做到了", "完成了", "爽", "冲", "搞定", "done", "nailed it", "great"],
 }
 
 

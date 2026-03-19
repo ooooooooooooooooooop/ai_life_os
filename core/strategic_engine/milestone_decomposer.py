@@ -13,7 +13,7 @@ def decompose_vision(
     """
     Decompose a Vision into Objectives and initial Goals.
     """
-    llm = get_llm("strategic_brain")
+    llm = get_llm("strategic_brain", task_type="strategic")
     system_prompt = load_prompt("milestone_planning")
 
     if not system_prompt:

@@ -251,6 +251,9 @@ class CronScheduler:
         handlers = {
             "daily-retrospective": self._daily_retrospective_handler,
             "weekly-retrospective": self._weekly_retrospective_handler,
+            "weekly-evolution": self._weekly_evolution_handler,
+            "daily-evolution-monitor": self._daily_evolution_monitor_handler,
+            "wecom-morning-push": self._wecom_morning_push_handler,
         }
         return handlers.get(name)
 
@@ -329,6 +332,69 @@ class CronScheduler:
 
         except Exception as e:
             logger.error(f"[CronScheduler] 每周复盘失败: {e}")
+
+    def _weekly_evolution_handler(self) -> None:
+        """每周进化任务处理函数。"""
+        try:
+            from core.evolution_engine import observe, generate_rule, validate_rule, apply_rule
+
+            logger.info("[CronScheduler] 开始执行每周进化...")
+
+            # 1. 观察
+            observation = observe(days=30)
+            logger.info(f"[CronScheduler] 观察完成: {observation['pattern'][:100]}")
+
+            # 2. 生成
+            rule = generate_rule(observation)
+            logger.info(f"[CronScheduler] 规则生成完成: {rule['rule_id']}")
+
+            # 3. 验证
+            passed, reason = validate_rule(rule)
+
+            if passed:
+                # 标记规则已验证
+                rule["validated"] = True
+
+                # 4. 应用
+                success = apply_rule(rule)
+                if success:
+                    logger.info(f"[CronScheduler] 规则应用成功: {rule['rule_id']}")
+                else:
+                    logger.error(f"[CronScheduler] 规则应用失败: {rule['rule_id']}")
+            else:
+                logger.warning(f"[CronScheduler] 规则验证失败: {reason}")
+
+            logger.info("[CronScheduler] 每周进化完成")
+
+        except Exception as e:
+            logger.error(f"[CronScheduler] 每周进化失败: {e}")
+
+    def _daily_evolution_monitor_handler(self) -> None:
+        """每日进化监控任务处理函数。"""
+        try:
+            from core.evolution_monitor import evaluate_rules, rollback_rule
+
+            logger.info("[CronScheduler] 开始执行每日进化监控...")
+
+            # 1. 评估
+            results = evaluate_rules()
+            logger.info(f"[CronScheduler] 评估完成: {len(results)}条规则")
+
+            # 2. 回滚
+            rollback_count = 0
+            for result in results:
+                if result['should_rollback']:
+                    success = rollback_rule(result['rule_id'])
+                    if success:
+                        rollback_count += 1
+                        logger.info(f"[CronScheduler] 规则已回滚: {result['rule_id']}")
+                    else:
+                        logger.error(f"[CronScheduler] 规则回滚失败: {result['rule_id']}")
+
+            logger.info(f"[CronScheduler] 每日进化监控完成: 回滚{rollback_count}条规则")
+
+        except Exception as e:
+            logger.error(f"[CronScheduler] 每日进化监控失败: {e}")
 
     def _send_telegram_notification(self, title: str, content: str) -> None:
         """
@@ -418,6 +484,77 @@ class CronScheduler:
                 lines.append(f"• {signal.get('name')}: {signal.get('summary', '')}")
 
         return "\n".join(lines)
+
+    def _wecom_morning_push_handler(self) -> None:
+        """企业微信早安推送任务处理函数。"""
+        try:
+            logger.info("[CronScheduler] 开始执行企业微信早安推送...")
+
+            # 检查企业微信是否启用
+            if not self._is_wecom_enabled():
+                logger.info("[CronScheduler] 企业微信未启用，跳过早安推送")
+                return
+
+            # TODO: 调用 Steward 生成今日任务计划
+            # from core.steward import Steward
+            # steward = Steward()
+            # plan = steward.generate_today_plan()
+
+            # 临时消息
+            message = (
+                "🌅 早安！新的一天开始了\n\n"
+                "今日任务计划功能正在开发中，敬请期待！\n\n"
+                "祝您今天工作顺利！"
+            )
+
+            # 发送企业微信消息
+            self._send_wecom_notification(message)
+
+            logger.info("[CronScheduler] 企业微信早安推送完成")
+
+        except Exception as e:
+            logger.error(f"[CronScheduler] 企业微信早安推送失败: {e}")
+
+    def _is_wecom_enabled(self) -> bool:
+        """检查企业微信是否启用。"""
+        try:
+            import yaml
+            from pathlib import Path
+
+            config_path = Path("config/wecom.yaml")
+            if not config_path.exists():
+                return False
+
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+
+            return config.get("enabled", False)
+
+        except Exception:
+            return False
+
+    def _send_wecom_notification(self, message: str) -> None:
+        """
+        发送企业微信通知。
+
+        Args:
+            message: 消息内容
+        """
+        try:
+            from interface.notifiers.wecom_notifier import WeComNotifier
+
+            notifier = WeComNotifier()
+            if notifier.is_available():
+                success = notifier.send_raw(message)
+                if success:
+                    logger.info("[CronScheduler] 企业微信消息发送成功")
+                else:
+                    logger.warning("[CronScheduler] 企业微信消息发送失败")
+            else:
+                logger.warning("[CronScheduler] 企业微信推送器不可用")
+
+        except Exception as e:
+            logger.error(f"[CronScheduler] 发送企业微信消息异常: {e}")
 
 
 # 单例实例

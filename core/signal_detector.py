@@ -252,6 +252,14 @@ def detect_deviation_signals(
         },
     ]
 
+    # 接入 intervention_tracker：记录抵抗并写入干预级别
+    from core.intervention_tracker import record_resistance, get_intervention_level
+    for signal in signals:
+        if signal.get("active"):
+            key = signal.get("name", "unknown")
+            record_resistance(key)
+            signal["intervention_level"] = get_intervention_level(key)
+
     return signals
 
 

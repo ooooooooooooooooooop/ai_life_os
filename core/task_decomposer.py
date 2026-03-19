@@ -16,7 +16,7 @@ class TaskDecomposer:
 
     def __init__(self):
         # Use simple model for decomposition as it's more structured
-        self.llm = get_llm()
+        self.llm = get_llm(task_type="decompose")
 
     def decompose_goal(self, goal: Goal, start_date: date) -> List[Task]:
         """

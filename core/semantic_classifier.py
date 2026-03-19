@@ -23,7 +23,7 @@ def classify_action(description: str) -> Optional[Dict[str, Any]]:
     注意：
         使用 cost_efficient 模型以降低延迟和成本。
     """
-    llm = get_llm("cost_efficient")  # 使用低成本模型
+    llm = get_llm("cost_efficient", task_type="classify")  # 使用低成本模型
 
     prompt = load_prompt("classification/verification", variables={
         "description": description

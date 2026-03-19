@@ -587,7 +587,7 @@ class Steward:
         # ... (Same logic as before, just treating as substrate_task usually) ...
         # For brevity, reusing the logic but mapping to new priority
         actions = []
-        llm = get_llm("simple_local")
+        llm = get_llm("simple_local", task_type="rhythm")
         if llm.get_model_name() == "rule_based":
             return actions
 

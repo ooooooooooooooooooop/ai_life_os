@@ -1,0 +1,36 @@
+# 企业微信配置
+# 用于企业微信消息接收和推送功能
+
+# 企业 ID（必填）
+# 在企业微信管理后台 -> 我的企业 -> 企业信息 中查看
+corp_id: "ww3b1f3bbb83c38309"
+
+# 应用 Secret（必填）
+# 在企业微信管理后台 -> 应用管理 -> 选择应用 -> 查看应用详情 中查看
+corp_secret: "ytH5r7WKSmzoI9i2Zf4QOrVcC7gw_RMPjSP-XrCRc2E"
+
+# 应用 AgentId（必填）
+# 在企业微信管理后台 -> 应用管理 -> 选择应用 -> 查看应用详情 中查看
+agent_id: "1000002"
+
+# 默认推送对象（可选，默认值：@all）
+# 可以是用户 ID、部门 ID 或标签 ID
+# 例如：
+#   - "@all"：推送给所有用户
+#   - "zhangsan"：推送给指定用户
+#   - "zhangsan|lisi"：推送给多个用户（用 | 分隔）
+to_user: "@all"
+
+# 消息加密 Token（可选）
+# 如果配置了消息加密，需要填写此项
+# 在企业微信管理后台 -> 应用管理 -> 选择应用 -> 设置 API 接收 中配置
+token: "z6MfdC5vqP6k7pstu3RibG"
+
+# 消息加密 EncodingAESKey（可选）
+# 如果配置了消息加密，需要填写此项
+# 在企业微信管理后台 -> 应用管理 -> 选择应用 -> 设置 API 接收 中配置
+encoding_aes_key: "6f4qe7J446263USk7J5FIFmERHaLquiSYBB5aEWYJW0"
+
+# 是否启用企业微信接入（可选，默认值：false）
+# 设置为 true 后，系统将启用企业微信消息接收和推送功能
+enabled: true

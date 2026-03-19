@@ -63,7 +63,7 @@ def infer_vision(
         )
 
     # 4. 构建 Prompt
-    llm = get_llm("strategic_brain")
+    llm = get_llm("strategic_brain", task_type="strategic")
     system_prompt = load_prompt("vision_synthesis")
 
     if not system_prompt:

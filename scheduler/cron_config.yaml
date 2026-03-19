@@ -16,6 +16,18 @@ jobs:
     cron: "0 20 * * 0"
     enabled: true
 
+  - name: weekly-evolution
+    cron: "0 2 * * 0"
+    enabled: true
+
+  - name: daily-evolution-monitor
+    cron: "0 3 * * *"
+    enabled: true
+
+  - name: wecom-morning-push
+    cron: "0 8 * * *"
+    enabled: true
+
 # Telegram 通知配置
 telegram:
   enabled: true  # false 则只打 log 不发消息

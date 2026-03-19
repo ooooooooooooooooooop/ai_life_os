@@ -11,6 +11,7 @@ from web.backend.routers import api, goals, onboarding, tasks
 from web.backend.routers import memory
 from web.backend.routers import skills
 from interface.telegram_bot import router as telegram_router
+from interface.wecom_bot import router as wecom_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("api")
@@ -71,6 +72,7 @@ def create_app() -> FastAPI:
     app.include_router(memory.router, prefix="/api/v1/memory", tags=["memory"])
     app.include_router(skills.router, prefix="/api/v1/skills", tags=["skills"])
     app.include_router(telegram_router, prefix="/telegram", tags=["telegram"])
+    app.include_router(wecom_router, prefix="/wecom", tags=["wecom"])
 
     frontend_dist = Path(__file__).parent.parent / "client" / "dist"
     logger.info("Looking for frontend at: %s", frontend_dist.absolute())
